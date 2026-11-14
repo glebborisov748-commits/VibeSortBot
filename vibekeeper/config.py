@@ -14,7 +14,7 @@ class Config:
     allowed_ids: frozenset[int]
     lastfm_key: str
     data_dir: Path
-    port: int = 8000
+    port: int = 3000
     scan_limit: int = 300
 
     @classmethod
@@ -35,7 +35,7 @@ class Config:
         return cls(os.environ["BOT_TOKEN"], os.environ["SPOTIFY_CLIENT_ID"],
                    os.environ["SPOTIFY_CLIENT_SECRET"], base,
                    os.environ["TOKEN_ENCRYPTION_KEY"], ids, os.getenv("LASTFM_API_KEY", ""),
-                   Path(os.getenv("DATA_DIR", "./data")), int(os.getenv("PORT", "8000")), limit)
+                   Path(os.getenv("DATA_DIR", "./data")), int(os.getenv("PORT", "3000")), limit)
 
     @property
     def redirect_uri(self):
