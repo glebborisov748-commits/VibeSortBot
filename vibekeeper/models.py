@@ -10,6 +10,7 @@ class Track:
     url: str
     tags: list[str] = field(default_factory=list)
     tag_url: str = ""
+    tag_source: str = ""
 
 
 class MusicProvider(Protocol):
