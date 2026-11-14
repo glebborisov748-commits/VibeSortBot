@@ -85,7 +85,7 @@ class Application:
         if command == "/id":
             await message.answer(f"Твой Telegram ID: <code>{uid}</code>")
             return
-        if uid not in self.config.allowed_ids:
+        if self.config.allowed_ids and uid not in self.config.allowed_ids:
             await message.answer(f"Сейчас бот доступен тестировщикам. Твой Telegram ID: <code>{uid}</code>")
             return
 
@@ -150,7 +150,7 @@ class Application:
         await reply(text, reply_markup=keyboard(rows))
 
     async def callback(self, query: CallbackQuery):
-        if not query.message or query.message.chat.type != "private" or query.from_user.id not in self.config.allowed_ids:
+        if not query.message or query.message.chat.type != "private" or (self.config.allowed_ids and query.from_user.id not in self.config.allowed_ids):
             await query.answer("Нет доступа", show_alert=True)
             return
         await query.answer()
@@ -208,7 +208,7 @@ class Application:
     async def oauth(self, request):
         state = request.query.get("state", "")
         uid = self.store.state_owner(state)
-        if uid is None or uid not in self.config.allowed_ids:
+        if uid is None or (self.config.allowed_ids and uid not in self.config.allowed_ids):
             return web.Response(text="Ссылка устарела. Вернись в Telegram и введи /connect.", status=400)
         async with self.locks[uid]:
             saved = self.store.consume_state(state)
