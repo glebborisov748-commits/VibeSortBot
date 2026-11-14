@@ -12,6 +12,7 @@ from aiohttp import web
 from .imports import classify_import, parse_text_tracks
 from .providers import ProviderError
 from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
+from .playlist_links import fetch_playlist
 
 
 def telegram_user(init_data, token):
@@ -78,6 +79,16 @@ def install_miniapp(server, application, session):
             if not isinstance(text, str) or len(text) > 100_000:
                 raise ProviderError("Список слишком большой.")
             tracks = parse_text_tracks(text)
+            source_ref = data.get("source_ref")
+            public_source = application.store.draft(uid, source_ref) if isinstance(source_ref, str) and source_ref else None
+            if source_ref and (not public_source or public_source.get("source") != "playlist_pending"):
+                raise ProviderError("Ссылка устарела. Загрузи плейлист ещё раз.")
+            if public_source:
+                originals = {(", ".join(item["artists"]), item["title"]): item for item in public_source["tracks"]}
+                for track in tracks:
+                    original = originals.get((", ".join(track.artists), track.title))
+                    if original:
+                        track.uri, track.url = original["uri"], original["url"]
         except (ValueError, AttributeError, ProviderError) as error:
             return web.json_response({"error": str(error)}, status=400)
         if not application.config.lastfm_key and not ai_available():
@@ -88,7 +99,7 @@ def install_miniapp(server, application, session):
         jobs[job_id] = {"uid": uid, "created": time.time(), "status": "running"}
         async def work():
             try:
-                draft, body = await classify_import(uid, tracks, application.store, application.curator.tagger)
+                draft, body = await classify_import(uid, tracks, application.store, application.curator.tagger, allow_ai=not bool(public_source))
                 jobs[job_id].update(status="ready", draft=draft, body=body)
             except ProviderError as error:
                 jobs[job_id].update(status="error", error=str(error))
@@ -107,6 +118,22 @@ def install_miniapp(server, application, session):
         if not job or job["uid"] != uid:
             raise web.HTTPNotFound()
         return web.json_response({key: value for key, value in job.items() if key not in ("uid", "created")})
+
+    async def playlist(request):
+        uid = identity(request)
+        if application.locks[uid].locked():
+            return web.json_response({"error": "Дождись предыдущей операции."}, status=409)
+        async with application.locks[uid]:
+            try:
+                data = await request.json()
+                url = data.get("url", "")
+                if not isinstance(url, str) or len(url) > 2048:
+                    raise ProviderError("Некорректная ссылка.")
+                imported = await fetch_playlist(session, url)
+                ref = application.store.save_draft(uid, {"source": "playlist_pending", **imported})
+                return web.json_response({"source_ref": ref, "text": imported["text"], "title": imported["title"], "count": len(imported["tracks"])})
+            except (ProviderError, ValueError, AttributeError) as error:
+                return web.json_response({"error": str(error)}, status=400)
 
     async def cleanup_loop():
         while True:
@@ -131,5 +158,6 @@ def install_miniapp(server, application, session):
     server.router.add_get("/", index)
     server.router.add_get("/app", index)
     server.router.add_post("/api/ocr", ocr)
+    server.router.add_post("/api/playlist", playlist)
     server.router.add_post("/api/analyze", analyze)
     server.router.add_get("/api/jobs/{job}", status)
