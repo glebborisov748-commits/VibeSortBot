@@ -19,7 +19,7 @@ class Config:
 
     @classmethod
     def from_env(cls):
-        required = ("BOT_TOKEN", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
+        required = ("BOT_TOKEN",
                     "PUBLIC_BASE_URL", "TOKEN_ENCRYPTION_KEY")
         missing = [key for key in required if not os.getenv(key, "").strip()]
         if missing:
@@ -32,8 +32,8 @@ class Config:
         limit = int(os.getenv("SCAN_LIMIT", "300"))
         if not 1 <= limit <= 10000:
             raise ValueError("SCAN_LIMIT должен быть от 1 до 10000")
-        return cls(os.environ["BOT_TOKEN"], os.environ["SPOTIFY_CLIENT_ID"],
-                   os.environ["SPOTIFY_CLIENT_SECRET"], base,
+        return cls(os.environ["BOT_TOKEN"], os.getenv("SPOTIFY_CLIENT_ID", ""),
+                   os.getenv("SPOTIFY_CLIENT_SECRET", ""), base,
                    os.environ["TOKEN_ENCRYPTION_KEY"], ids, os.getenv("LASTFM_API_KEY", ""),
                    Path(os.getenv("DATA_DIR", "./data")), int(os.getenv("PORT", "3000")), limit)
 
