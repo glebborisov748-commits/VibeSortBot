@@ -12,6 +12,7 @@ from vibekeeper.app import Application, secure_headers
 from vibekeeper.classifier import group_tracks
 from vibekeeper.config import Config
 from vibekeeper.models import Track
+from vibekeeper.imports import parse_tracks, playlist_csv
 from vibekeeper.providers import LastFM, ProviderError, Spotify
 from vibekeeper.service import Curator
 from vibekeeper.store import Store
@@ -265,3 +266,29 @@ def test_purge_removes_expired_user_data(store):
         store.db.execute("UPDATE drafts SET expires=0")
     store.purge_expired()
     assert store.export(1, draft, "rock") is None
+
+
+def test_csv_import_and_export():
+    tracks = parse_tracks(b"Artist Name(s),Track Name\nRadiohead,No Surprises\nRadiohead,No Surprises\nM83,Midnight City\n")
+    assert [(t.artists, t.title) for t in tracks] == [(["Radiohead"], "No Surprises"), (["M83"], "Midnight City")]
+    payload = playlist_csv([{"artists": ["=HYPERLINK(1)"], "title": "+cmd"}])
+    assert b"'=HYPERLINK(1)" in payload and b"'+cmd" in payload
+
+
+def test_csv_import_rejects_invalid_input():
+    with pytest.raises(ProviderError):
+        parse_tracks(b"wrong,columns\na,b\n")
+    with pytest.raises(ProviderError):
+        parse_tracks(b"artist,title\n" + b"x" * 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_import_draft_cannot_write_spotify(store):
+    from vibekeeper.imports import import_draft
+    provider = SimpleNamespace(create_playlist=AsyncMock())
+    tagger = SimpleNamespace(enrich=AsyncMock(side_effect=lambda tracks: tracks[0].tags.append("rock")))
+    draft, body = await import_draft(1, b"artist,title\nRadiohead,No Surprises\n", store, tagger)
+    assert "rock" in body["groups"]
+    with pytest.raises(ProviderError):
+        await Curator(store, provider, tagger, 300).export(1, draft, "rock")
+    provider.create_playlist.assert_not_awaited()
