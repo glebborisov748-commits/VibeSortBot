@@ -12,7 +12,7 @@ from vibekeeper.app import Application, secure_headers
 from vibekeeper.classifier import group_tracks
 from vibekeeper.config import Config
 from vibekeeper.models import Track
-from vibekeeper.imports import parse_tracks, playlist_csv
+from vibekeeper.imports import parse_text_tracks, parse_tracks, playlist_csv, playlist_text
 from vibekeeper.providers import LastFM, ProviderError, Spotify
 from vibekeeper.service import Curator
 from vibekeeper.store import Store
@@ -324,3 +324,26 @@ async def test_spotify_check_identifies_account_before_reading_likes(config, sto
     assert "account-id" in reply.await_args_list[1].args[0]
     assert "12" in reply.await_args_list[2].args[0]
     assert all("not-displayed" not in call.args[0] for call in reply.await_args_list)
+
+
+def test_text_import_preserves_hyphens_and_rejects_ambiguous_rows():
+    tracks = parse_text_tracks("\nJay-Z - Song - Remix\nКино — Группа крови\nКино — Группа крови\n")
+    assert len(tracks) == 2
+    assert tracks[0].artists == ["Jay-Z"]
+    assert tracks[0].title == "Song - Remix"
+    assert "Кино — Группа крови" in playlist_text([asdict(t) for t in tracks]).decode()
+    with pytest.raises(ProviderError, match="строку 2"):
+        parse_text_tracks("Radiohead — No Surprises\nНепонятная строка")
+
+
+@pytest.mark.asyncio
+async def test_message_text_classifies_without_spotify(config, store):
+    app = Application(config, store, None, None)
+    app.curator.tagger.enrich = AsyncMock(side_effect=lambda tracks: tracks[0].tags.append("rock"))
+    app.spotify.request = AsyncMock(side_effect=AssertionError("Spotify must not be called"))
+    reply = AsyncMock()
+    await app.message(SimpleNamespace(chat=SimpleNamespace(type="private"), from_user=SimpleNamespace(id=1),
+                                      text="Radiohead — No Surprises", document=None, answer=reply))
+    app.curator.tagger.enrich.assert_awaited_once()
+    app.spotify.request.assert_not_awaited()
+    assert "Рок" in reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
