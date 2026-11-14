@@ -9,31 +9,32 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .classifier import LABELS, group_tracks
 from .config import Config
+from .imports import MAX_IMPORT_BYTES, import_draft, playlist_csv
 from .models import Track
 from .providers import LastFM, ProviderError, Spotify
 from .service import Curator
 from .store import Store
 
 HELP = (
-    "🎧 <b>VibeSort</b> собирает плейлисты из твоих любимых треков Spotify.\n\n"
-    "1. Подключи Spotify.\n"
-    "2. Нажми «Разобрать любимые».\n"
-    "3. Посмотри подборки и создай понравившиеся.\n\n"
-    "Для знакомства есть пример без подключения. Бот пока в тестовом режиме; "
-    "жанры и настроение определяются по тегам Last.fm.\n\n"
+    "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
+    "Пришли CSV-файл со столбцами artist,title → посмотри подборки → скачай понравившиеся. "
+    "Для примера есть кнопка ниже.\n\n"
+    "Подключение Spotify и создание плейлистов прямо в нём пока доступны тестовой группе: /connect → /scan. "
+    "Жанры и настроение определяются по тегам Last.fm.\n\n"
     "Данные и отключение аккаунта: /privacy · /disconnect"
 )
 PRIVACY = (
     "Это тестовая версия.\n\n"
     "При подключении сохраняю зашифрованные токены Spotify, чтобы читать лайки "
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
-    "При /scan передаю Last.fm названия треков и исполнителей для поиска тегов. "
+    "При /scan или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
     "Настроение определяется приблизительно по этим тегам, без анализа аудио и нейросети. "
-    "Нажимая /scan, ты соглашаешься с такой передачей.\n\n"
+    "Нажимая /scan или отправляя CSV, ты соглашаешься с такой передачей. "
+    "Загруженный файл используется только во время разбора; подборки сохраняются в зашифрованном черновике на 24 часа.\n\n"
     "Черновики с треками зашифрованы и доступны 24 часа. Данные хранятся на хостинге владельца бота. "
     "Рекламы, платежей и передачи библиотеки рекламодателям в этой версии нет.\n\n"
     "/disconnect удаляет токены, черновики и историю операций из рабочей базы бота; "
@@ -88,13 +89,21 @@ class Application:
             return
 
         async def operation():
+            if message.document:
+                await self.import_document(uid, message)
+                return
             if command in ("/start", "/help"):
-                rows = []
+                rows = [[button("Как загрузить CSV", "import")], [button("Посмотреть пример", "demo")]]
                 if not self.store.account(uid):
-                    rows.append([InlineKeyboardButton(text="1. Подключить Spotify", url=self.spotify.login_url(uid))])
-                rows.append([button("2. Разобрать любимые", "scan")])
-                rows.append([button("Посмотреть пример", "demo")])
+                    rows.append([InlineKeyboardButton(text="Spotify · тестовый доступ", url=self.spotify.login_url(uid))])
+                else:
+                    rows.append([button("Разобрать мои лайки Spotify", "scan")])
                 await message.answer(HELP, reply_markup=keyboard(rows))
+            elif command == "/import":
+                await message.answer("Пришли CSV-файл до 1 МБ со столбцами artist,title. "
+                                     "Например:\n<code>artist,title\nRadiohead,No Surprises\nM83,Midnight City</code>\n\n"
+                                     "Разберу до 300 треков. Результат можно скачать отдельными CSV-файлами. "
+                                     "Перед отправкой прочитай /privacy.")
             elif command == "/connect":
                 url = self.spotify.login_url(uid)
                 await message.answer(
@@ -114,6 +123,23 @@ class Application:
                 await message.answer("Список команд: /help")
 
         await self.guarded(uid, message.answer, operation)
+
+    async def import_document(self, uid, message):
+        document = message.document
+        if not document.file_name or not document.file_name.lower().endswith(".csv"):
+            raise ProviderError("Пришли CSV-файл. Формат и пример: /import.")
+        if document.file_size and document.file_size > MAX_IMPORT_BYTES:
+            raise ProviderError("Файл слишком большой. Максимум — 1 МБ.")
+        if not self.config.lastfm_key:
+            raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
+        source = await self.bot.get_file(document.file_id)
+        if not source.file_path:
+            raise ProviderError("Не удалось получить файл из Telegram. Отправь его ещё раз.")
+        buffer = await self.bot.download_file(source.file_path)
+        data = buffer.read(MAX_IMPORT_BYTES + 1)
+        await message.answer("Читаю список и ищу жанры и настроение. Это может занять несколько минут.")
+        draft, body = await import_draft(uid, data, self.store, self.curator.tagger)
+        await self.show_groups(draft, body, message.answer)
 
     async def scan(self, uid, reply):
         if not self.store.account(uid):
@@ -143,7 +169,8 @@ class Application:
             return
         prefix = "Демонстрация на вымышленных треках.\n\n" if body["demo"] else ""
         text = prefix + f"Доступных треков обработано: {body['scanned']}. Всего лайков: {body['total']}.\n\n"
-        text += "Выбери подборку: покажу примеры и предложу создать её в Spotify.\n"
+        action = "скачать её CSV-файлом" if body.get("source") == "import" else "создать её в Spotify"
+        text += f"Выбери подборку: покажу примеры и предложу {action}.\n"
         text += "Жанр и настроение могут пересекаться. Без подходящих тегов — «Без категории». Черновик доступен 24 часа."
         rows = [[button(f"{LABELS[key]} · {len(items)}", f"preview:{draft}:{key}")]
                 for key, items in body["groups"].items()]
@@ -159,13 +186,19 @@ class Application:
         parts = (query.data or "").split(":")
 
         async def operation():
+            if parts == ["import"]:
+                await reply("Пришли CSV-файл до 1 МБ со столбцами artist,title. "
+                            "Например:\n<code>artist,title\nRadiohead,No Surprises\nM83,Midnight City</code>\n\n"
+                            "Разберу до 300 треков. Результат можно скачать отдельными CSV-файлами. "
+                            "Перед отправкой прочитай /privacy.")
+                return
             if parts == ["scan"]:
                 await self.scan(uid, reply)
                 return
             if parts == ["demo"]:
                 await self.demo(uid, reply)
                 return
-            if len(parts) != 3 or parts[0] not in ("preview", "export", "groups"):
+            if len(parts) != 3 or parts[0] not in ("preview", "export", "groups", "download"):
                 return
             action, draft, category = parts
             body = self.store.draft(uid, draft)
@@ -181,7 +214,7 @@ class Application:
                 lines = [f"<b>{LABELS[category]}</b> · {len(tracks)} треков\n"]
                 for track in tracks[:5]:
                     title = escape((", ".join(track["artists"]) + " — " + track["title"])[:180])
-                    if not body["demo"]:
+                    if not body["demo"] and body.get("source") != "import":
                         title = f'<a href="{escape(track["url"], quote=True)}">{title}</a> (Spotify)'
                     lines.append(title)
                     if track["tags"]:
@@ -189,13 +222,23 @@ class Application:
                         if track.get("tag_url"):
                             lines.append(f'<a href="{escape(track["tag_url"], quote=True)}">Источник: Last.fm</a>')
                 rows = []
-                if not body["demo"]:
+                if body.get("source") == "import":
+                    lines.append("\nСкачать эту подборку CSV-файлом?")
+                    rows.append([button("Скачать CSV", f"download:{draft}:{category}")])
+                elif not body["demo"]:
                     lines.append("\nСоздать новый приватный плейлист со всеми треками этой подборки?")
                     rows.append([button("Создать в Spotify", f"export:{draft}:{category}")])
                 else:
                     lines.append("\nДемо: запись в Spotify отключена.")
                 rows.append([button("← К подборкам", f"groups:{draft}:all")])
                 await reply("\n".join(lines), reply_markup=keyboard(rows), disable_web_page_preview=True)
+            elif action == "download":
+                if body.get("source") != "import":
+                    raise ProviderError("Эта подборка не из загруженного файла.")
+                payload = playlist_csv(tracks)
+                await query.message.answer_document(
+                    BufferedInputFile(payload, filename=f"vibesort-{category}.csv"),
+                    caption=f"{LABELS[category]} · {len(tracks)} треков")
             else:
                 await reply("Создаю плейлист в Spotify…")
                 playlist_id = await self.curator.export(uid, draft, category)
@@ -271,7 +314,8 @@ async def run():
                     await web.TCPSite(runner, "0.0.0.0", config.port).start()
                     await bot.set_my_commands([BotCommand(command=command, description=description) for command, description in [
                         ("start", "Начать"), ("connect", "Подключить Spotify"), ("scan", "Разобрать любимые"),
-                        ("demo", "Демонстрация"), ("privacy", "О данных"), ("disconnect", "Удалить данные"), ("id", "Мой Telegram ID"),
+                        ("demo", "Демонстрация"), ("import", "Загрузить список треков"),
+                        ("privacy", "О данных"), ("disconnect", "Удалить данные"), ("id", "Мой Telegram ID"),
                     ]])
                     await bot.delete_webhook(drop_pending_updates=False)
                     await dispatcher.start_polling(bot, close_bot_session=False)
