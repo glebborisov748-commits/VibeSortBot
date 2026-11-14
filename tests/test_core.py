@@ -149,8 +149,23 @@ class Response:
     async def __aexit__(self, *args):
         return False
 
-    async def json(self):
+    async def json(self, **kwargs):
         return self.data
+
+
+@pytest.mark.asyncio
+async def test_forbidden_explains_error_without_credentials(config, store):
+    store.save_account(1, {"access_token": "private-access", "refresh_token": "private-refresh",
+                           "scope": "user-library-read", "expires_at": time.time()+3600})
+    session = SimpleNamespace(request=lambda *a, **kw: Response(403, {
+        "error": {"message": "Check developer settings private-access private-refresh"}
+    }))
+    with pytest.raises(ProviderError) as error:
+        await Spotify(config, store, session).request(1, "GET", "/me/tracks")
+    message = str(error.value)
+    assert "Check developer settings" in message
+    assert "читать лайки: есть" in message
+    assert "private-access" not in message and "private-refresh" not in message
 
 
 @pytest.mark.asyncio
