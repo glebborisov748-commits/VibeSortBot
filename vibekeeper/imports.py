@@ -85,16 +85,16 @@ async def import_draft(uid, data, store, tagger):
     return await classify_import(uid, tracks, store, tagger)
 
 
-async def classify_import(uid, tracks, store, tagger):
+async def classify_import(uid, tracks, store, tagger, allow_ai=True):
     warning = ""
     try:
         await tagger.enrich(tracks)
     except ProviderError as error:
-        if not ai_available():
+        if not ai_available() and allow_ai:
             raise
         warning = str(error)
     missing = [track for track in tracks if not track.tags]
-    if missing and ai_available():
+    if missing and ai_available() and allow_ai:
         await infer_tags(tagger.session, missing)
     groups = group_tracks(tracks)
     body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import", "tag_warning": warning,
