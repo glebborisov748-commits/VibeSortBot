@@ -161,8 +161,19 @@ class LastFM:
             if lookup not in cache:
                 cache[lookup] = await self.tags(*lookup)
             track.tags, track.tag_url = cache[lookup]
+            track.tag_source = "lastfm" if track.tags else ""
 
     async def tags(self, artist, title):
+        for attempt in range(3):
+            try:
+                return await self._tags_once(artist, title)
+            except ProviderError as error:
+                retryable = any(marker in str(error) for marker in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "Нет связи"))
+                if not retryable or attempt == 2:
+                    raise
+                await asyncio.sleep(attempt + 1)
+
+    async def _tags_once(self, artist, title):
         async with self.gate:
             await asyncio.sleep(max(0, self.next_request-time.monotonic()))
             self.next_request = time.monotonic() + 0.3
@@ -172,14 +183,16 @@ class LastFM:
                     "api_key": self.key, "format": "json", "autocorrect": "1",
                 }) as response:
                     if response.status != 200:
-                        raise ProviderError("Last.fm временно недоступен. Разбор не сохранён, попробуй позже.")
+                        raise ProviderError(f"Last.fm: HTTP {response.status}. Сервис не ответил на запрос тегов.")
                     data = await response.json()
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 raise ProviderError("Нет связи с Last.fm. Попробуй позже.") from None
         if data.get("error") == 6:  # Not found is a valid unclassified track.
             return [], ""
         if data.get("error"):
-            raise ProviderError("Last.fm отклонил запрос. Проверь API-ключ или попробуй позже.")
+            code = data.get("error")
+            hint = "Проверь API-ключ Last.fm." if code in (10, 26) else "Сервис отклонил запрос тегов."
+            raise ProviderError(f"Last.fm: ошибка API {code}. {hint}")
         tags = data.get("toptags", {}).get("tag", [])
         if isinstance(tags, dict):
             tags = [tags]
