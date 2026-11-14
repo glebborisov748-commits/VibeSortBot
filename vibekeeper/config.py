@@ -24,7 +24,7 @@ class Config:
         missing = [key for key in required if not os.getenv(key, "").strip()]
         if missing:
             raise ValueError("Заполните переменные: " + ", ".join(missing))
-        base = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+        base = os.environ["PUBLIC_BASE_URL"].strip().rstrip("/")
         parsed = urlparse(base)
         if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username:
             raise ValueError("PUBLIC_BASE_URL должен быть HTTPS-адресом без пути")
