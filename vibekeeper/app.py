@@ -112,6 +112,8 @@ class Application:
                     reply_markup=keyboard([[InlineKeyboardButton(text="Подключить Spotify", url=url)]]))
             elif command == "/scan":
                 await self.scan(uid, message.answer)
+            elif command == "/check":
+                await self.check_spotify(uid, message.answer)
             elif command == "/demo":
                 await self.demo(uid, message.answer)
             elif command == "/privacy":
@@ -123,6 +125,17 @@ class Application:
                 await message.answer("Список команд: /help")
 
         await self.guarded(uid, message.answer, operation)
+
+    async def check_spotify(self, uid, reply):
+        if not self.store.account(uid):
+            raise ProviderError("Сначала подключи Spotify: /connect")
+        await reply("Проверяю аккаунт Spotify и доступ к одному лайку. Плейлисты не создаются.")
+        profile = await self.spotify.request(uid, "GET", "/me")
+        name = escape(str(profile.get("display_name") or "Без имени"))
+        identity = escape(str(profile.get("id") or "не возвращён"))
+        await reply(f"Профиль Spotify доступен.\nИмя: {name}\nSpotify ID: <code>{identity}</code>")
+        page = await self.spotify.request(uid, "GET", "/me/tracks", params={"limit": 1})
+        await reply(f"Лайки доступны. Всего в библиотеке: {int(page.get('total', 0))}. Можно запускать /scan.")
 
     async def import_document(self, uid, message):
         document = message.document
@@ -316,6 +329,7 @@ async def run():
                         ("start", "Начать"), ("connect", "Подключить Spotify"), ("scan", "Разобрать любимые"),
                         ("demo", "Демонстрация"), ("import", "Загрузить список треков"),
                         ("privacy", "О данных"), ("disconnect", "Удалить данные"), ("id", "Мой Telegram ID"),
+                        ("check", "Проверить подключение Spotify"),
                     ]])
                     await bot.delete_webhook(drop_pending_updates=False)
                     await dispatcher.start_polling(bot, close_bot_session=False)
