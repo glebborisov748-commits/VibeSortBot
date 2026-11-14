@@ -81,3 +81,40 @@ async def test_image_recognition_returns_editable_text(monkeypatch):
         return Result()
     text=await recognize_tracks(SimpleNamespace(post=post), b'\x89PNG\r\n\x1a\ntest')
     assert text=='Radiohead — No Surprises'
+
+
+@pytest.mark.asyncio
+async def test_lastfm_failure_falls_back_to_ai_and_labels_estimates(store, monkeypatch):
+    from vibekeeper.imports import classify_import, parse_text_tracks
+    monkeypatch.setenv('PROVOD_API_KEY', 'test-only-key')
+    class Result:
+        status=200
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def json(self):
+            return {'choices':[{'message':{'content':'{"tracks":[{"id":0,"tags":["electronic","dark"]},{"id":1,"tags":[]}]}'}}]}
+    tagger=SimpleNamespace(enrich=AsyncMock(side_effect=ProviderError('Last.fm: HTTP 403.')),
+                           session=SimpleNamespace(post=lambda *a, **k:Result()))
+    tracks=parse_text_tracks('PHNKR — PANDORA\nUnknown — Not Known')
+    draft, body=await classify_import(1, tracks, store, tagger)
+    assert body['ai_estimated'] is True
+    assert body['tag_warning']=='Last.fm: HTTP 403.'
+    assert set(body['groups'])=={'electronic','dark','unknown'}
+    assert body['groups']['dark'][0]['tag_source']=='ai'
+    assert store.draft(1,draft)['groups']==body['groups']
+
+
+@pytest.mark.asyncio
+async def test_ai_fallback_cannot_replace_titles(monkeypatch):
+    from vibekeeper.vision import infer_tags
+    from vibekeeper.models import Track
+    monkeypatch.setenv('PROVOD_API_KEY','test-key')
+    class Result:
+        status=200
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): return False
+        async def json(self):
+            return {'choices':[{'message':{'content':'{"tracks":[{"id":0,"title":"wrong","tags":["made up","rock"]}]}'}}]}
+    track=Track('import:0','Original',['Artist'],'')
+    await infer_tags(SimpleNamespace(post=lambda *a,**k:Result()),[track])
+    assert track.title=='Original' and track.tags==['rock']
