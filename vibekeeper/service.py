@@ -22,6 +22,8 @@ class Curator:
             raise ProviderError("Эта подборка устарела. Запусти /scan заново.")
         if body.get("demo"):
             raise ProviderError("Это демонстрация. Для настоящих треков используй /connect и /scan.")
+        if body.get("source") == "import":
+            raise ProviderError("Загруженный список можно скачать CSV-файлом; создание в Spotify доступно после /connect и /scan.")
         if not self.store.reserve_export(uid, draft_id, category):
             previous = self.store.export(uid, draft_id, category)
             if previous["status"] == "complete":
