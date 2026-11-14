@@ -1,5 +1,6 @@
 import csv
 import io
+import re
 from dataclasses import asdict
 
 from .classifier import group_tracks
@@ -8,6 +9,29 @@ from .providers import ProviderError
 
 MAX_IMPORT_BYTES = 1_000_000
 MAX_IMPORT_ROWS = 300
+
+
+def parse_text_tracks(text: str) -> list[Track]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or len(lines) > MAX_IMPORT_ROWS:
+        raise ProviderError("Пришли от 1 до 300 треков, каждый с новой строки: Исполнитель — Название.")
+    tracks, seen = [], set()
+    for number, line in enumerate(lines, 1):
+        parts = re.split(r"\s+[—–-]\s+", line, maxsplit=1)
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ProviderError(f"Не понял строку {number}. Напиши так: Radiohead — No Surprises. Каждый трек — с новой строки.")
+        artist, title = (part.strip() for part in parts)
+        if len(artist) > 150 or len(title) > 200:
+            raise ProviderError(f"Слишком длинное имя или название в строке {number}.")
+        identity = (artist.casefold(), title.casefold())
+        if identity not in seen:
+            seen.add(identity)
+            tracks.append(Track(f"import:{len(tracks)}", title, [artist], ""))
+    return tracks
+
+
+def playlist_text(items: list[dict]) -> bytes:
+    return ("\n".join(", ".join(item["artists"]) + " — " + item["title"] for item in items) + "\n").encode("utf-8")
 
 
 def parse_tracks(data: bytes) -> list[Track]:
@@ -57,6 +81,10 @@ def playlist_csv(items: list[dict]) -> bytes:
 
 async def import_draft(uid, data, store, tagger):
     tracks = parse_tracks(data)
+    return await classify_import(uid, tracks, store, tagger)
+
+
+async def classify_import(uid, tracks, store, tagger):
     await tagger.enrich(tracks)
     groups = group_tracks(tracks)
     body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import",
