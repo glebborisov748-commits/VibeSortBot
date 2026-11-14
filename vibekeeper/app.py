@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from contextlib import suppress
 from collections import defaultdict
 from dataclasses import asdict
@@ -20,10 +21,12 @@ from .service import Curator
 from .store import Store
 from .miniapp import install_miniapp
 from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
+from .playlist_links import fetch_playlist
 
 HELP = (
     "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
     "Открой приложение кнопкой ниже: загрузи скриншот песен или вставь список. Фото можно отправить и прямо в чат.\n\n"
+    "Или отправь ссылку на публичный плейлист Spotify — загружу песни, доступные без входа.\n\n"
     "Просто отправь названия треков, каждый с новой строки:\n"
     "<code>Radiohead — No Surprises\nM83 — Midnight City</code>\n\n"
     "Покажу подборки и теги. Большую таблицу можно загрузить CSV-файлом через /import. "
@@ -40,6 +43,7 @@ PRIVACY = (
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
     "При /scan, отправке списка текстом или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
     "Для загруженных списков и фото при отсутствии тегов или сбое Last.fm названия передаются Provod AI для приблизительной оценки. Это использует баланс AI-провайдера. "
+    "Для песен, полученных напрямую по ссылке Spotify, AI-резерв не применяется: используем Last.fm. Если теги недоступны, сохраняем исходный список без придуманного жанра. "
     "Настроение определяется приблизительно по этим тегам, без анализа аудио и нейросети. "
     "Нажимая /scan или отправляя список треков, ты соглашаешься с такой передачей. "
     "Загруженный файл используется только во время разбора; подборки сохраняются в зашифрованном черновике на 24 часа.\n\n"
@@ -98,6 +102,16 @@ class Application:
             return
 
         async def operation():
+            if message.text and re.search(r"https://open\.spotify\.com/\S+", message.text):
+                url = re.search(r"https://open\.spotify\.com/\S+", message.text).group(0)
+                await message.answer("Загружаю публично доступные песни плейлиста…")
+                imported = await fetch_playlist(self.session, url)
+                draft = self.store.save_draft(uid, {"source": "playlist_pending", **imported})
+                preview = "\n".join(imported["text"].splitlines()[:5])
+                await message.answer(escape(imported["title"]) + f"\nПолучено треков: {len(imported['tracks'])}.\n\n" + escape(preview) +
+                                     "\n\nЭто песни, которые Spotify показал без входа; полный состав не гарантирован. Разбор по тегам Last.fm.",
+                                     reply_markup=keyboard([[button("Разобрать этот список", f"playlist:{draft}")]]))
+                return
             if getattr(message, "photo", None):
                 await self.recognize_photo(uid, message)
                 return
@@ -237,6 +251,8 @@ class Application:
         text = prefix + f"Доступных треков обработано: {body['scanned']}. Всего лайков: {body['total']}.\n\n"
         if body.get("ai_estimated"):
             text += "Часть тегов оценена AI приблизительно, без прослушивания аудио.\n"
+        if body.get("tag_warning") and not body.get("ai_estimated"):
+            text += "Теги Last.fm недоступны для части списка. Эти песни сохранены в «Без категории».\n"
         action = "скачать её списком" if body.get("source") == "import" else "создать её в Spotify"
         text += f"Выбери подборку: покажу примеры и предложу {action}.\n"
         text += "Жанр и настроение могут пересекаться. Без подходящих тегов — «Без категории». Черновик доступен 24 часа."
@@ -254,6 +270,15 @@ class Application:
         parts = (query.data or "").split(":")
 
         async def operation():
+            if len(parts) == 2 and parts[0] == "playlist":
+                pending = self.store.draft(uid, parts[1])
+                if not pending or pending.get("source") != "playlist_pending":
+                    raise ProviderError("Загруженный плейлист устарел. Отправь ссылку заново.")
+                tracks = [Track(**item) for item in pending["tracks"]]
+                await reply("Ищу теги для загруженных треков…")
+                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger, allow_ai=False)
+                await self.show_groups(draft, body, reply)
+                return
             if len(parts) == 2 and parts[0] == "photo":
                 pending = self.store.draft(uid, parts[1])
                 if not pending or pending.get("source") != "photo_pending":
