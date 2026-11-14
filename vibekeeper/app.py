@@ -13,7 +13,7 @@ from aiogram.types import BotCommand, BufferedInputFile, CallbackQuery, InlineKe
 
 from .classifier import LABELS, group_tracks
 from .config import Config
-from .imports import MAX_IMPORT_BYTES, import_draft, playlist_csv
+from .imports import MAX_IMPORT_BYTES, classify_import, import_draft, parse_text_tracks, playlist_csv, playlist_text
 from .models import Track
 from .providers import LastFM, ProviderError, Spotify
 from .service import Curator
@@ -21,7 +21,9 @@ from .store import Store
 
 HELP = (
     "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
-    "Пришли CSV-файл со столбцами artist,title → посмотри подборки → скачай понравившиеся. "
+    "Просто отправь названия треков, каждый с новой строки:\n"
+    "<code>Radiohead — No Surprises\nM83 — Midnight City</code>\n\n"
+    "Покажу подборки и теги. Большую таблицу можно загрузить CSV-файлом через /import. "
     "Для примера есть кнопка ниже.\n\n"
     "Подключение Spotify и создание плейлистов прямо в нём пока доступны тестовой группе: /connect → /scan. "
     "Жанры и настроение определяются по тегам Last.fm.\n\n"
@@ -31,9 +33,9 @@ PRIVACY = (
     "Это тестовая версия.\n\n"
     "При подключении сохраняю зашифрованные токены Spotify, чтобы читать лайки "
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
-    "При /scan или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
+    "При /scan, отправке списка текстом или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
     "Настроение определяется приблизительно по этим тегам, без анализа аудио и нейросети. "
-    "Нажимая /scan или отправляя CSV, ты соглашаешься с такой передачей. "
+    "Нажимая /scan или отправляя список треков, ты соглашаешься с такой передачей. "
     "Загруженный файл используется только во время разбора; подборки сохраняются в зашифрованном черновике на 24 часа.\n\n"
     "Черновики с треками зашифрованы и доступны 24 часа. Данные хранятся на хостинге владельца бота. "
     "Рекламы, платежей и передачи библиотеки рекламодателям в этой версии нет.\n\n"
@@ -93,7 +95,7 @@ class Application:
                 await self.import_document(uid, message)
                 return
             if command in ("/start", "/help"):
-                rows = [[button("Как загрузить CSV", "import")], [button("Посмотреть пример", "demo")]]
+                rows = [[button("Посмотреть пример", "demo")], [button("Загрузить таблицу CSV", "import")]]
                 if not self.store.account(uid):
                     rows.append([InlineKeyboardButton(text="Spotify · тестовый доступ", url=self.spotify.login_url(uid))])
                 else:
@@ -122,7 +124,15 @@ class Application:
                 self.store.disconnect(uid)
                 await message.answer("Аккаунт отключён, данные удалены из базы бота. Плейлисты в Spotify остались.")
             else:
-                await message.answer("Список команд: /help")
+                if message.text and not message.text.startswith("/"):
+                    tracks = parse_text_tracks(message.text)
+                    if not self.config.lastfm_key:
+                        raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
+                    await message.answer(f"Ищу жанры и настроение для {len(tracks)} треков…")
+                    draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger)
+                    await self.show_groups(draft, body, message.answer)
+                else:
+                    await message.answer("Список команд: /help")
 
         await self.guarded(uid, message.answer, operation)
 
@@ -182,7 +192,7 @@ class Application:
             return
         prefix = "Демонстрация на вымышленных треках.\n\n" if body["demo"] else ""
         text = prefix + f"Доступных треков обработано: {body['scanned']}. Всего лайков: {body['total']}.\n\n"
-        action = "скачать её CSV-файлом" if body.get("source") == "import" else "создать её в Spotify"
+        action = "скачать её списком" if body.get("source") == "import" else "создать её в Spotify"
         text += f"Выбери подборку: покажу примеры и предложу {action}.\n"
         text += "Жанр и настроение могут пересекаться. Без подходящих тегов — «Без категории». Черновик доступен 24 часа."
         rows = [[button(f"{LABELS[key]} · {len(items)}", f"preview:{draft}:{key}")]
@@ -211,7 +221,7 @@ class Application:
             if parts == ["demo"]:
                 await self.demo(uid, reply)
                 return
-            if len(parts) != 3 or parts[0] not in ("preview", "export", "groups", "download"):
+            if len(parts) != 3 or parts[0] not in ("preview", "export", "groups", "download", "downloadtxt"):
                 return
             action, draft, category = parts
             body = self.store.draft(uid, draft)
@@ -236,7 +246,8 @@ class Application:
                             lines.append(f'<a href="{escape(track["tag_url"], quote=True)}">Источник: Last.fm</a>')
                 rows = []
                 if body.get("source") == "import":
-                    lines.append("\nСкачать эту подборку CSV-файлом?")
+                    lines.append("\nПодборку можно сохранить списком:")
+                    rows.append([button("Скачать список TXT", f"downloadtxt:{draft}:{category}")])
                     rows.append([button("Скачать CSV", f"download:{draft}:{category}")])
                 elif not body["demo"]:
                     lines.append("\nСоздать новый приватный плейлист со всеми треками этой подборки?")
@@ -245,12 +256,14 @@ class Application:
                     lines.append("\nДемо: запись в Spotify отключена.")
                 rows.append([button("← К подборкам", f"groups:{draft}:all")])
                 await reply("\n".join(lines), reply_markup=keyboard(rows), disable_web_page_preview=True)
-            elif action == "download":
+            elif action in ("download", "downloadtxt"):
                 if body.get("source") != "import":
                     raise ProviderError("Эта подборка не из загруженного файла.")
-                payload = playlist_csv(tracks)
+                plain = action == "downloadtxt"
+                payload = playlist_text(tracks) if plain else playlist_csv(tracks)
+                extension = "txt" if plain else "csv"
                 await query.message.answer_document(
-                    BufferedInputFile(payload, filename=f"vibesort-{category}.csv"),
+                    BufferedInputFile(payload, filename=f"vibesort-{category}.{extension}"),
                     caption=f"{LABELS[category]} · {len(tracks)} треков")
             else:
                 await reply("Создаю плейлист в Spotify…")
