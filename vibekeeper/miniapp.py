@@ -11,7 +11,7 @@ from aiohttp import web
 
 from .imports import classify_import, parse_text_tracks
 from .providers import ProviderError
-from .vision import MAX_IMAGE_BYTES, recognize_tracks
+from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
 
 
 def telegram_user(init_data, token):
@@ -80,7 +80,7 @@ def install_miniapp(server, application, session):
             tracks = parse_text_tracks(text)
         except (ValueError, AttributeError, ProviderError) as error:
             return web.json_response({"error": str(error)}, status=400)
-        if not application.config.lastfm_key:
+        if not application.config.lastfm_key and not ai_available():
             return web.json_response({"error": "Сервис жанров ещё не подключён владельцем бота."}, status=503)
         # Acquire before scheduling: concurrent requests cannot create duplicate jobs.
         await application.locks[uid].acquire()
