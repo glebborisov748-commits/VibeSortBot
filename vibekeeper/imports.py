@@ -6,6 +6,7 @@ from dataclasses import asdict
 from .classifier import group_tracks
 from .models import Track
 from .providers import ProviderError
+from .vision import ai_available, infer_tags
 
 MAX_IMPORT_BYTES = 1_000_000
 MAX_IMPORT_ROWS = 300
@@ -85,8 +86,18 @@ async def import_draft(uid, data, store, tagger):
 
 
 async def classify_import(uid, tracks, store, tagger):
-    await tagger.enrich(tracks)
+    warning = ""
+    try:
+        await tagger.enrich(tracks)
+    except ProviderError as error:
+        if not ai_available():
+            raise
+        warning = str(error)
+    missing = [track for track in tracks if not track.tags]
+    if missing and ai_available():
+        await infer_tags(tagger.session, missing)
     groups = group_tracks(tracks)
-    body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import",
+    body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import", "tag_warning": warning,
+            "ai_estimated": any(track.tag_source == "ai" for track in tracks),
             "groups": {key: [asdict(track) for track in group] for key, group in groups.items()}}
     return store.save_draft(uid, body), body
