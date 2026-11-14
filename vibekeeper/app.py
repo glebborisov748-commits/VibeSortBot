@@ -19,18 +19,16 @@ from .service import Curator
 from .store import Store
 
 HELP = (
-    "🎧 VibeSort — разложим твои любимые треки по плейлистам.\n\n"
-    "/connect — подключить Spotify\n"
-    "/scan — разобрать любимые\n"
-    "/demo — пример без подключения\n"
-    "/privacy — что происходит с данными\n"
-    "/disconnect — отключить аккаунт и удалить данные\n"
-    "/id — твой Telegram ID\n\n"
-    "Сначала покажу подборки, затем ты выберешь, какие создать. "
-    "Один трек может попасть в несколько подборок."
+    "🎧 <b>VibeSort</b> собирает плейлисты из твоих любимых треков Spotify.\n\n"
+    "1. Подключи Spotify.\n"
+    "2. Нажми «Разобрать любимые».\n"
+    "3. Посмотри подборки и создай понравившиеся.\n\n"
+    "Для знакомства есть пример без подключения. Бот пока в тестовом режиме; "
+    "жанры и настроение определяются по тегам Last.fm.\n\n"
+    "Данные и отключение аккаунта: /privacy · /disconnect"
 )
 PRIVACY = (
-    "Это закрытая тестовая версия.\n\n"
+    "Это тестовая версия.\n\n"
     "При подключении сохраняю зашифрованные токены Spotify, чтобы читать лайки "
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
     "При /scan передаю Last.fm названия треков и исполнителей для поиска тегов. "
@@ -91,10 +89,12 @@ class Application:
 
         async def operation():
             if command in ("/start", "/help"):
-                await message.answer(HELP, reply_markup=keyboard([
-                    [button("🎧 Разобрать любимые", "scan")],
-                    [button("Посмотреть пример", "demo")],
-                ]))
+                rows = []
+                if not self.store.account(uid):
+                    rows.append([InlineKeyboardButton(text="1. Подключить Spotify", url=self.spotify.login_url(uid))])
+                rows.append([button("2. Разобрать любимые", "scan")])
+                rows.append([button("Посмотреть пример", "demo")])
+                await message.answer(HELP, reply_markup=keyboard(rows))
             elif command == "/connect":
                 url = self.spotify.login_url(uid)
                 await message.answer(
@@ -119,7 +119,7 @@ class Application:
         if not self.store.account(uid):
             raise ProviderError("Сначала подключи Spotify: /connect")
         if not self.config.lastfm_key:
-            raise ProviderError("Добавь LASTFM_API_KEY в настройках хостинга. Пока доступен /demo.")
+            raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
         await reply(f"Читаю до {self.config.scan_limit} последних лайков и ищу теги Last.fm. "
                     "Это может занять несколько минут. О передаче названий треков: /privacy")
         draft, body = await self.curator.scan(uid)
