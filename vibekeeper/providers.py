@@ -129,7 +129,7 @@ class LastFM:
 
     async def enrich(self, tracks):
         if not self.key:
-            raise ProviderError("Для разбора нужен LASTFM_API_KEY в настройках хостинга. Пока можно посмотреть /demo.")
+            raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
         # Per-scan cache only, no cross-user retention of a listening library.
         cache = {}
         for track in tracks:
