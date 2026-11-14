@@ -307,3 +307,20 @@ async def test_import_draft_cannot_write_spotify(store):
     with pytest.raises(ProviderError):
         await Curator(store, provider, tagger, 300).export(1, draft, "rock")
     provider.create_playlist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_spotify_check_identifies_account_before_reading_likes(config, store):
+    store.save_account(1, {"access_token": "not-displayed"})
+    app = Application(config, store, None, None)
+    app.spotify.request = AsyncMock(side_effect=[
+        {"id": "account-id", "display_name": "<Artist>"}, {"total": 12}
+    ])
+    reply = AsyncMock()
+    await app.check_spotify(1, reply)
+    assert app.spotify.request.await_args_list[0].args == (1, "GET", "/me")
+    assert app.spotify.request.await_args_list[1].args == (1, "GET", "/me/tracks")
+    assert "&lt;Artist&gt;" in reply.await_args_list[1].args[0]
+    assert "account-id" in reply.await_args_list[1].args[0]
+    assert "12" in reply.await_args_list[2].args[0]
+    assert all("not-displayed" not in call.args[0] for call in reply.await_args_list)
