@@ -80,7 +80,29 @@ class Spotify:
                         await asyncio.sleep(delay)
                         continue
                     if response.status == 403:
-                        raise ProviderError("Spotify отказал в доступе. Проверь Premium владельца приложения, список тестировщиков и разрешения /connect.")
+                        detail = ""
+                        try:
+                            payload = await response.json(content_type=None)
+                            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+                            detail = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+                        except (ValueError, aiohttp.ContentTypeError):
+                            text = await response.text()
+                            if "<" not in text:
+                                detail = text[:500]
+                        saved = self.store.account(uid) or {}
+                        # Only the error message is displayed; strip any known credentials.
+                        for secret in (token, saved.get("refresh_token"), self.config.client_secret):
+                            if secret:
+                                detail = detail.replace(secret, "[скрыто]")
+                        scopes = set(saved.get("scope", "").split())
+                        scope_info = ("есть" if "user-library-read" in scopes else "не выдано") if "scope" in saved else "нет сведений"
+                        raise ProviderError(
+                            f"Spotify: отказ 403 при {method} {path}.\n"
+                            f"Причина: {detail[:350] or 'Spotify не прислал пояснение'}.\n"
+                            f"Разрешение читать лайки: {scope_info}.\n"
+                            f"Client ID приложения заканчивается на: {self.config.client_id[-6:]}.\n"
+                            "Пришли это сообщение разработчику бота для проверки."
+                        )
                     if response.status >= 400:
                         raise ProviderError(f"Spotify вернул ошибку {response.status}. Попробуй позже или переподключи аккаунт.")
                     return await response.json()
