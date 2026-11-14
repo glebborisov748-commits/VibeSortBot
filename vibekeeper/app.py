@@ -19,7 +19,7 @@ from .providers import LastFM, ProviderError, Spotify
 from .service import Curator
 from .store import Store
 from .miniapp import install_miniapp
-from .vision import MAX_IMAGE_BYTES, recognize_tracks
+from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
 
 HELP = (
     "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
@@ -39,6 +39,7 @@ PRIVACY = (
     "При подключении сохраняю зашифрованные токены Spotify, чтобы читать лайки "
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
     "При /scan, отправке списка текстом или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
+    "Для загруженных списков и фото при отсутствии тегов или сбое Last.fm названия передаются Provod AI для приблизительной оценки. Это использует баланс AI-провайдера. "
     "Настроение определяется приблизительно по этим тегам, без анализа аудио и нейросети. "
     "Нажимая /scan или отправляя список треков, ты соглашаешься с такой передачей. "
     "Загруженный файл используется только во время разбора; подборки сохраняются в зашифрованном черновике на 24 часа.\n\n"
@@ -144,7 +145,7 @@ class Application:
             else:
                 if message.text and not message.text.startswith("/"):
                     tracks = parse_text_tracks(message.text)
-                    if not self.config.lastfm_key:
+                    if not self.config.lastfm_key and not ai_available():
                         raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
                     await message.answer(f"Ищу жанры и настроение для {len(tracks)} треков…")
                     draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger)
@@ -195,7 +196,7 @@ class Application:
             raise ProviderError("Пришли CSV-файл. Формат и пример: /import.")
         if document.file_size and document.file_size > MAX_IMPORT_BYTES:
             raise ProviderError("Файл слишком большой. Максимум — 1 МБ.")
-        if not self.config.lastfm_key:
+        if not self.config.lastfm_key and not ai_available():
             raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
         source = await self.bot.get_file(document.file_id)
         if not source.file_path:
@@ -234,6 +235,8 @@ class Application:
             return
         prefix = "Демонстрация на вымышленных треках.\n\n" if body["demo"] else ""
         text = prefix + f"Доступных треков обработано: {body['scanned']}. Всего лайков: {body['total']}.\n\n"
+        if body.get("ai_estimated"):
+            text += "Часть тегов оценена AI приблизительно, без прослушивания аудио.\n"
         action = "скачать её списком" if body.get("source") == "import" else "создать её в Spotify"
         text += f"Выбери подборку: покажу примеры и предложу {action}.\n"
         text += "Жанр и настроение могут пересекаться. Без подходящих тегов — «Без категории». Черновик доступен 24 часа."
@@ -293,6 +296,8 @@ class Application:
                     lines.append(title)
                     if track["tags"]:
                         lines.append("Теги: " + escape(", ".join(track["tags"][:5])[:180]))
+                        if track.get("tag_source") == "ai":
+                            lines.append("Источник: приблизительная оценка AI, без анализа аудио.")
                         if track.get("tag_url"):
                             lines.append(f'<a href="{escape(track["tag_url"], quote=True)}">Источник: Last.fm</a>')
                 rows = []
