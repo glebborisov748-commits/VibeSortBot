@@ -9,7 +9,7 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, MenuButtonWebApp, WebAppInfo
 
 from .classifier import LABELS, group_tracks
 from .config import Config
@@ -18,9 +18,12 @@ from .models import Track
 from .providers import LastFM, ProviderError, Spotify
 from .service import Curator
 from .store import Store
+from .miniapp import install_miniapp
+from .vision import MAX_IMAGE_BYTES, recognize_tracks
 
 HELP = (
     "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
+    "Открой приложение кнопкой ниже: загрузи скриншот песен или вставь список. Фото можно отправить и прямо в чат.\n\n"
     "Просто отправь названия треков, каждый с новой строки:\n"
     "<code>Radiohead — No Surprises\nM83 — Midnight City</code>\n\n"
     "Покажу подборки и теги. Большую таблицу можно загрузить CSV-файлом через /import. "
@@ -31,6 +34,8 @@ HELP = (
 )
 PRIVACY = (
     "Это тестовая версия.\n\n"
+    "При загрузке фото оно отправляется настроенному владельцем AI-провайдеру (Provod AI) для распознавания. "
+    "Не отправляй изображения с личными данными. Распознанные названия можно проверить до разбора.\n\n"
     "При подключении сохраняю зашифрованные токены Spotify, чтобы читать лайки "
     "и по твоей кнопке создавать приватные плейлисты. Пароль Spotify мне не нужен.\n\n"
     "При /scan, отправке списка текстом или загрузке CSV передаю Last.fm названия треков и исполнителей для поиска тегов. "
@@ -56,6 +61,7 @@ def button(text, data):
 class Application:
     def __init__(self, config, store, session, bot):
         self.config, self.store, self.bot = config, store, bot
+        self.session = session
         self.spotify = Spotify(config, store, session)
         self.curator = Curator(store, self.spotify, LastFM(config.lastfm_key, session), config.scan_limit)
         self.locks = defaultdict(asyncio.Lock)
@@ -91,14 +97,21 @@ class Application:
             return
 
         async def operation():
+            if getattr(message, "photo", None):
+                await self.recognize_photo(uid, message)
+                return
             if message.document:
+                if message.document.mime_type in ("image/png", "image/jpeg", "image/webp"):
+                    await self.recognize_photo(uid, message)
+                    return
                 await self.import_document(uid, message)
                 return
             if command in ("/start", "/help"):
-                rows = [[button("Посмотреть пример", "demo")], [button("Загрузить таблицу CSV", "import")]]
-                if not self.store.account(uid):
+                rows = [[InlineKeyboardButton(text="Открыть VibeSort ↗", web_app=WebAppInfo(url=self.config.base_url + "/app"))],
+                        [button("Посмотреть пример", "demo")], [button("Загрузить таблицу CSV", "import")]]
+                if self.config.client_id and not self.store.account(uid):
                     rows.append([InlineKeyboardButton(text="Spotify · тестовый доступ", url=self.spotify.login_url(uid))])
-                else:
+                elif self.store.account(uid):
                     rows.append([button("Разобрать мои лайки Spotify", "scan")])
                 await message.answer(HELP, reply_markup=keyboard(rows))
             elif command == "/import":
@@ -107,6 +120,8 @@ class Application:
                                      "Разберу до 300 треков. Результат можно скачать отдельными CSV-файлами. "
                                      "Перед отправкой прочитай /privacy.")
             elif command == "/connect":
+                if not self.config.client_id or not self.config.client_secret:
+                    raise ProviderError("Подключение Spotify пока отключено. Отправь список или скриншот треков.")
                 url = self.spotify.login_url(uid)
                 await message.answer(
                     "Подключи Spotify через официальную страницу входа. Ссылка действует 10 минут. "
@@ -122,6 +137,9 @@ class Application:
                 await message.answer(PRIVACY)
             elif command == "/disconnect":
                 self.store.disconnect(uid)
+                for job in list(getattr(self, "mini_jobs", {})):
+                    if self.mini_jobs[job]["uid"] == uid:
+                        del self.mini_jobs[job]
                 await message.answer("Аккаунт отключён, данные удалены из базы бота. Плейлисты в Spotify остались.")
             else:
                 if message.text and not message.text.startswith("/"):
@@ -135,6 +153,30 @@ class Application:
                     await message.answer("Список команд: /help")
 
         await self.guarded(uid, message.answer, operation)
+
+    async def recognize_photo(self, uid, message):
+        attachment = message.photo[-1] if message.photo else message.document
+        if attachment.file_size and attachment.file_size > MAX_IMAGE_BYTES:
+            raise ProviderError("Фото должно быть меньше 6 МБ.")
+        file = await self.bot.get_file(attachment.file_id)
+        if not file.file_path:
+            raise ProviderError("Не удалось загрузить фото.")
+        await message.answer("Читаю скриншот… Потом покажу список для проверки.")
+        buffer = await self.bot.download_file(file.file_path)
+        text = await recognize_tracks(self.session, buffer.read(MAX_IMAGE_BYTES + 1))
+        draft = self.store.save_draft(uid, {"source": "photo_pending", "text": text})
+        lines, chunk = [], ""
+        for line in text.splitlines():
+            if len(chunk) + len(line) > 2800:
+                lines.append(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            lines.append(chunk)
+        for chunk in lines:
+            await message.answer(escape(chunk))
+        await message.answer("Проверь названия. Если есть ошибка — отправь исправленный список обычным сообщением. Если всё верно:",
+                             reply_markup=keyboard([[button("Всё верно — разобрать", f"photo:{draft}")]]))
 
     async def check_spotify(self, uid, reply):
         if not self.store.account(uid):
@@ -209,6 +251,15 @@ class Application:
         parts = (query.data or "").split(":")
 
         async def operation():
+            if len(parts) == 2 and parts[0] == "photo":
+                pending = self.store.draft(uid, parts[1])
+                if not pending or pending.get("source") != "photo_pending":
+                    raise ProviderError("Распознанный список устарел. Отправь фото заново.")
+                tracks = parse_text_tracks(pending["text"])
+                await reply("Ищу жанры и настроение…")
+                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger)
+                await self.show_groups(draft, body, reply)
+                return
             if parts == ["import"]:
                 await reply("Пришли CSV-файл до 1 МБ со столбцами artist,title. "
                             "Например:\n<code>artist,title\nRadiohead,No Surprises\nM83,Midnight City</code>\n\n"
@@ -303,7 +354,7 @@ class Application:
 async def secure_headers(request, handler):
     response = await handler(request)
     response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"})
+                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"})
     return response
 
 
@@ -317,7 +368,10 @@ async def run():
                 application = Application(config, store, session, bot)
                 dispatcher = Dispatcher()
                 dispatcher.include_router(application.router)
-                server = web.Application(middlewares=[secure_headers])
+                server = web.Application(middlewares=[secure_headers], client_max_size=MAX_IMAGE_BYTES + 1024)
+                install_miniapp(server, application, session)
+                from pathlib import Path
+                server.router.add_static("/assets/", Path(__file__).parent / "web", show_index=False)
                 server.router.add_get("/oauth/spotify", application.oauth)
 
                 async def health(request):
@@ -345,6 +399,7 @@ async def run():
                         ("check", "Проверить подключение Spotify"),
                     ]])
                     await bot.delete_webhook(drop_pending_updates=False)
+                    await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Открыть VibeSort", web_app=WebAppInfo(url=config.base_url + "/app")))
                     await dispatcher.start_polling(bot, close_bot_session=False)
                 finally:
                     maintenance_task.cancel()
