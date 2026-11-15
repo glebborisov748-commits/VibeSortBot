@@ -28,7 +28,7 @@ def parse_embed(html, expected_id):
         if page.get("status") == 404 or entity.get("id") != expected_id or entity.get("type") != "playlist":
             raise ProviderError("Spotify не отдал список с сервера VibeSort. Это не доказывает, что плейлист закрыт. Можно повторить загрузку или прислать скриншоты.")
         tracks, seen = [], set()
-        for item in entity.get("trackList", [])[:300]:
+        for item in entity.get("trackList", [])[:1000]:
             uri, title, artists = item.get("uri", ""), item.get("title"), item.get("subtitle")
             if not re.fullmatch(r"spotify:track:[A-Za-z0-9]{22}", uri) or uri in seen:
                 continue
