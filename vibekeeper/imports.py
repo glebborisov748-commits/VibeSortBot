@@ -3,7 +3,7 @@ import io
 import re
 from dataclasses import asdict
 
-from .classifier import group_tracks
+from .classifier import LABELS, group_tracks
 from .models import Track
 from .providers import ProviderError
 from .vision import ai_available, infer_tags
@@ -85,19 +85,29 @@ async def import_draft(uid, data, store, tagger):
     return await classify_import(uid, tracks, store, tagger)
 
 
-async def classify_import(uid, tracks, store, tagger, allow_ai=True):
+async def classify_import(uid, tracks, store, tagger, allow_ai=True, genre_hint=""):
     warning = ""
-    try:
-        await tagger.enrich(tracks)
-    except ProviderError as error:
-        if not ai_available() and allow_ai:
-            raise
-        warning = str(error)
+    allowed_hints = {"phonk", "funk", "rock", "pop", "hip hop", "electronic", "metal", "jazz", "classical"}
+    manual_genre = genre_hint in allowed_hints
+    if not manual_genre:
+        try:
+            await tagger.enrich(tracks)
+        except ProviderError as error:
+            if not ai_available() and allow_ai:
+                raise
+            warning = str(error)
     missing = [track for track in tracks if not track.tags]
-    if missing and ai_available() and allow_ai:
+    if missing and ai_available() and allow_ai and not manual_genre:
         await infer_tags(tagger.session, missing)
+    if manual_genre:
+        for track in tracks:
+            track.tags.append(genre_hint)
+            track.tag_source = "user" if not track.tag_source else track.tag_source
     groups = group_tracks(tracks)
     body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import", "tag_warning": warning,
             "ai_estimated": any(track.tag_source == "ai" for track in tracks),
             "groups": {key: [asdict(track) for track in group] for key, group in groups.items()}}
+    titles = [LABELS[key] for key in groups if key != "unknown"]
+    body["name"] = (" · ".join(titles[:2]) if titles else "Моя музыка") + f" · {len(tracks)} треков"
+    body["library_id"] = store.save_library(uid, body)
     return store.save_draft(uid, body), body
