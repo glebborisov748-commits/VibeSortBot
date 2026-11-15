@@ -3,6 +3,7 @@ import json
 import secrets
 import sqlite3
 import time
+import unicodedata
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -26,6 +27,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS library_owner ON library(uid, created);
             CREATE TABLE IF NOT EXISTS settings(uid INTEGER PRIMARY KEY, body BLOB);
             CREATE TABLE IF NOT EXISTS playlist_cache(id TEXT PRIMARY KEY, body BLOB, created REAL);
+            CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY, uid INTEGER, next_run REAL, status TEXT, error TEXT);
+            CREATE TABLE IF NOT EXISTS genre_overrides(uid INTEGER, fingerprint TEXT, body BLOB, PRIMARY KEY(uid, fingerprint));
         """)
         self.purge_expired()
 
@@ -51,12 +54,35 @@ class Store:
         for row in rows:
             body = self._decrypt(row["body"])
             result.append({"id": row["id"], "created": row["created"], "name": body.get("name", "Мои подборки"),
-                           "scanned": body.get("scanned", 0), "categories": {k:len(v) for k,v in body.get("groups", {}).items()}})
+                           "scanned": body.get("scanned", 0), "source_platform":body.get('source_platform'),
+                           "sync":self.subscription(uid,row['id']),
+                           "categories": {k:len(v) for k,v in body.get("groups", {}).items()}})
         return result
 
     def delete_library(self, uid, identity):
         with self.db:
             self.db.execute("DELETE FROM library WHERE uid=? AND id=?", (uid, identity))
+            self.db.execute("DELETE FROM subscriptions WHERE uid=? AND id=?", (uid, identity))
+
+    def subscription(self, uid, identity, enabled=None):
+        if enabled is not None:
+            if not self.library(uid, identity):
+                return None
+            with self.db:
+                if enabled:
+                    self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?, ?, ?, 'waiting', '')", (identity, uid, time.time()+21600))
+                else:
+                    self.db.execute("DELETE FROM subscriptions WHERE uid=? AND id=?", (uid, identity))
+        row=self.db.execute("SELECT next_run,status,error FROM subscriptions WHERE uid=? AND id=?", (uid,identity)).fetchone()
+        return {"enabled":True,**dict(row)} if row else {"enabled":False}
+
+    def due_subscriptions(self):
+        return [dict(row) for row in self.db.execute("SELECT * FROM subscriptions WHERE next_run<=? ORDER BY next_run LIMIT 1",(time.time(),)).fetchall()]
+
+    def subscription_result(self, uid, identity, error="", delay=21600):
+        with self.db:
+            self.db.execute("UPDATE subscriptions SET next_run=?,status=?,error=? WHERE uid=? AND id=?",
+                            (time.time()+delay,'error' if error else 'waiting',error[:350],uid,identity))
 
     def update_library(self, uid, identity, body):
         with self.db:
@@ -68,6 +94,16 @@ class Store:
                 self.db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (uid, self._encrypt(body)))
         row = self.db.execute("SELECT body FROM settings WHERE uid=?", (uid,)).fetchone()
         return self._decrypt(row[0]) if row else {"ai_fallback": True}
+
+    def track_genre(self, uid, track, genre=None):
+        text=", ".join(track.artists)+"\0"+track.title
+        normalized=" ".join(unicodedata.normalize('NFKC',text).casefold().split())
+        fingerprint=hashlib.sha256(normalized.encode()).hexdigest()
+        if genre is not None:
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO genre_overrides VALUES (?, ?, ?)',(uid,fingerprint,self._encrypt(genre)))
+        row=self.db.execute('SELECT body FROM genre_overrides WHERE uid=? AND fingerprint=?',(uid,fingerprint)).fetchone()
+        return self._decrypt(row[0]) if row else None
 
     def cache_playlist(self, identity, body=None):
         if body is not None:
@@ -137,7 +173,7 @@ class Store:
 
     def disconnect(self, uid):
         with self.db:
-            for table in ("accounts", "oauth", "drafts", "exports", "library", "settings"):
+            for table in ("accounts", "oauth", "drafts", "exports", "library", "settings", "subscriptions", "genre_overrides"):
                 self.db.execute(f"DELETE FROM {table} WHERE uid=?", (uid,))
 
     def close(self):
