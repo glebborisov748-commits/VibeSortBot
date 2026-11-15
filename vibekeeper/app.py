@@ -47,7 +47,7 @@ PRIVACY = (
     "Настроение определяется приблизительно по этим тегам, без анализа аудио и нейросети. "
     "Нажимая /scan или отправляя список треков, ты соглашаешься с такой передачей. "
     "Загруженный файл используется только во время разбора; подборки сохраняются в зашифрованном черновике на 24 часа.\n\n"
-    "Черновики с треками зашифрованы и доступны 24 часа. Данные хранятся на хостинге владельца бота. "
+    "Черновики доступны 24 часа. Готовые подборки зашифрованы и сохраняются в библиотеке до удаления пользователем. Данные хранятся на хостинге владельца бота. "
     "Рекламы, платежей и передачи библиотеки рекламодателям в этой версии нет.\n\n"
     "/disconnect удаляет токены, черновики и историю операций из рабочей базы бота; "
     "сообщения Telegram и созданные плейлисты остаются. Доступ также можно отозвать "
@@ -105,7 +105,7 @@ class Application:
             if message.text and re.search(r"https://open\.spotify\.com/\S+", message.text):
                 url = re.search(r"https://open\.spotify\.com/\S+", message.text).group(0)
                 await message.answer("Загружаю публично доступные песни плейлиста…")
-                imported = await fetch_playlist(self.session, url)
+                imported = await fetch_playlist(self.session, url, self.store)
                 draft = self.store.save_draft(uid, {"source": "playlist_pending", **imported})
                 preview = "\n".join(imported["text"].splitlines()[:5])
                 await message.answer(escape(imported["title"]) + f"\nПолучено треков: {len(imported['tracks'])}.\n\n" + escape(preview) +
@@ -382,9 +382,22 @@ class Application:
 
 @web.middleware
 async def secure_headers(request, handler):
-    response = await handler(request)
+    try:
+        response = await handler(request)
+    except web.HTTPException as error:
+        if not request.path.startswith("/api/"):
+            raise
+        messages = {401: "Сессия устарела. Закрой и открой Mini App в Telegram.",
+                    413: "Фото слишком большое. Максимум — 6 МБ.", 400: "Не удалось прочитать запрос. Повтори загрузку.",
+                    404: "Загрузка не найдена. Возможно, сервер перезапустился."}
+        response = web.json_response({"error": messages.get(error.status, "Сервер временно недоступен.")}, status=error.status)
+    except Exception as error:
+        if not request.path.startswith("/api/"):
+            raise
+        logging.getLogger(__name__).error("API failed: %s", type(error).__name__)
+        response = web.json_response({"error": "Не удалось завершить запрос. Попробуй позже."}, status=500)
     response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"})
+                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src https://open.spotify.com; frame-ancestors https://web.telegram.org https://*.telegram.org"})
     return response
 
 
