@@ -156,6 +156,8 @@ class LastFM:
         cache = {}
         artist_cache = {}
         for track in tracks:
+            if track.tags:
+                continue
             if not track.artists:
                 continue
             lookup = (track.artists[0], track.title)
@@ -166,9 +168,9 @@ class LastFM:
                 # Slowed/remix track pages are often missing; use artist genres only,
                 # never inherit the artist's mood tags for every recording.
                 if lookup[0] not in artist_cache:
-                    from .classifier import RULES, normalize
+                    from .classifier import RULES, GENRE_TAGS, normalize
                     genre_aliases = set().union(*(aliases for key, (_, aliases) in RULES.items()
-                                                  if key in {"phonk", "funk", "rock", "pop", "hiphop", "electronic", "metal", "jazz", "classical"}))
+                                                  if key in GENRE_TAGS))
                     names, source = await self.tags(lookup[0], "", artist_only=True)
                     artist_cache[lookup[0]] = ([name for name in names if normalize(name) in genre_aliases], source)
                 track.tags, track.tag_url = artist_cache[lookup[0]]
