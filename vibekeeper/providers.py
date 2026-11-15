@@ -154,6 +154,7 @@ class LastFM:
             raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
         # Per-scan cache only, no cross-user retention of a listening library.
         cache = {}
+        artist_cache = {}
         for track in tracks:
             if not track.artists:
                 continue
@@ -161,25 +162,35 @@ class LastFM:
             if lookup not in cache:
                 cache[lookup] = await self.tags(*lookup)
             track.tags, track.tag_url = cache[lookup]
+            if not track.tags:
+                # Slowed/remix track pages are often missing; use artist genres only,
+                # never inherit the artist's mood tags for every recording.
+                if lookup[0] not in artist_cache:
+                    from .classifier import RULES, normalize
+                    genre_aliases = set().union(*(aliases for key, (_, aliases) in RULES.items()
+                                                  if key in {"phonk", "funk", "rock", "pop", "hiphop", "electronic", "metal", "jazz", "classical"}))
+                    names, source = await self.tags(lookup[0], "", artist_only=True)
+                    artist_cache[lookup[0]] = ([name for name in names if normalize(name) in genre_aliases], source)
+                track.tags, track.tag_url = artist_cache[lookup[0]]
             track.tag_source = "lastfm" if track.tags else ""
 
-    async def tags(self, artist, title):
+    async def tags(self, artist, title, artist_only=False):
         for attempt in range(3):
             try:
-                return await self._tags_once(artist, title)
+                return await self._tags_once(artist, title, artist_only)
             except ProviderError as error:
                 retryable = any(marker in str(error) for marker in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "Нет связи"))
                 if not retryable or attempt == 2:
                     raise
                 await asyncio.sleep(attempt + 1)
 
-    async def _tags_once(self, artist, title):
+    async def _tags_once(self, artist, title, artist_only=False):
         async with self.gate:
             await asyncio.sleep(max(0, self.next_request-time.monotonic()))
             self.next_request = time.monotonic() + 0.3
             try:
                 async with self.session.get("https://ws.audioscrobbler.com/2.0/", params={
-                    "method": "track.getTopTags", "artist": artist, "track": title,
+                    "method": "artist.getTopTags" if artist_only else "track.getTopTags", "artist": artist, "track": title,
                     "api_key": self.key, "format": "json", "autocorrect": "1",
                 }) as response:
                     if response.status != 200:
@@ -187,6 +198,8 @@ class LastFM:
                     data = await response.json()
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 raise ProviderError("Нет связи с Last.fm. Попробуй позже.") from None
+            except ValueError:
+                raise ProviderError("Last.fm вернул некорректный ответ. Попробуй позже.") from None
         if data.get("error") == 6:  # Not found is a valid unclassified track.
             return [], ""
         if data.get("error"):
