@@ -133,7 +133,7 @@ class Application:
             elif command == "/import":
                 await message.answer("Пришли CSV-файл до 1 МБ со столбцами artist,title. "
                                      "Например:\n<code>artist,title\nRadiohead,No Surprises\nM83,Midnight City</code>\n\n"
-                                     "Разберу до 300 треков. Результат можно скачать отдельными CSV-файлами. "
+                                     "Разберу до 1000 треков. Результат можно скачать отдельными CSV-файлами. "
                                      "Перед отправкой прочитай /privacy.")
             elif command == "/connect":
                 if not self.config.client_id or not self.config.client_secret:
@@ -295,7 +295,7 @@ class Application:
             if parts == ["import"]:
                 await reply("Пришли CSV-файл до 1 МБ со столбцами artist,title. "
                             "Например:\n<code>artist,title\nRadiohead,No Surprises\nM83,Midnight City</code>\n\n"
-                            "Разберу до 300 треков. Результат можно скачать отдельными CSV-файлами. "
+                            "Разберу до 1000 треков. Результат можно скачать отдельными CSV-файлами. "
                             "Перед отправкой прочитай /privacy.")
                 return
             if parts == ["scan"]:
