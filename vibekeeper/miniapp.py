@@ -255,6 +255,30 @@ def install_miniapp(server, application, session):
             return web.json_response({'error':'Можно включить до пяти автоматических источников.'},status=400)
         return web.json_response(application.store.subscription(uid,key,enabled))
 
+    async def spotify_import(request):
+        uid=identity(request)
+        if not application.store.account(uid):
+            return web.json_response({'error':'Сначала подключи Spotify командой /connect в чате бота.'},status=400)
+        async def operation():
+            _,body=await application.curator.scan(uid,limit=10000)
+            return {'body':body}
+        return await start_job(uid,'analyze',operation)
+
+    async def spotify_export(request):
+        uid=identity(request)
+        key=request.match_info['item']
+        data=await request.json()
+        category=data.get('category')
+        body=application.store.library(uid,key)
+        if not isinstance(category,str) or not body or category not in body.get('groups',{}):
+            return web.json_response({'error':'Подборка не найдена.'},status=404)
+        if not application.store.account(uid):
+            return web.json_response({'error':'Сначала подключи свой Spotify через /connect в чате бота.'},status=400)
+        async def operation():
+            identity=await application.curator.export_library(uid,key,category)
+            return {'playlist_url':'https://open.spotify.com/playlist/'+identity}
+        return await start_job(uid,'export',operation)
+
     async def delete_data(request):
         uid=identity(request)
         if application.locks[uid].locked():
@@ -298,4 +322,6 @@ def install_miniapp(server, application, session):
     server.router.add_post('/api/library/{item}/reanalyze',reanalyze)
     server.router.add_post('/api/library/{item}/refresh',refresh)
     server.router.add_put('/api/library/{item}/sync',subscription)
+    server.router.add_post('/api/spotify/import',spotify_import)
+    server.router.add_post('/api/library/{item}/spotify',spotify_export)
     server.router.add_delete('/api/data',delete_data)
