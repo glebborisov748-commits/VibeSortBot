@@ -5,6 +5,8 @@ from .models import Track
 
 # Only explicit tags. A genre does not imply mood. Rules are intentionally editable.
 RULES = {
+    "phonk": ("Фонк", {"phonk", "drift phonk", "brazilian phonk", "фонк", "cosmic phonk", "cosmic funk", "lunar funk"}),
+    "funk": ("Фанк", {"funk", "brazilian funk", "baile funk", "funk carioca", "funk brasileiro", "бразильский фанк", "фанк"}),
     "rock": ("Рок", {"rock", "alternative rock", "indie rock", "hard rock", "punk rock", "post rock"}),
     "pop": ("Поп", {"pop", "indie pop", "synthpop", "dream pop", "electropop"}),
     "hiphop": ("Хип-хоп", {"hip hop", "rap", "trap", "russian rap", "хип хоп", "рэп"}),
