@@ -26,7 +26,7 @@ def parse_embed(html, expected_id):
         page = json.loads(match.group(1))["props"]["pageProps"]
         entity = page.get("state", {}).get("data", {}).get("entity", {})
         if page.get("status") == 404 or entity.get("id") != expected_id or entity.get("type") != "playlist":
-            raise ProviderError("Этот плейлист не открывается без входа. Проверь общедоступность или пришли скриншоты.")
+            raise ProviderError("Spotify не отдал список с сервера VibeSort. Это не доказывает, что плейлист закрыт. Можно повторить загрузку или прислать скриншоты.")
         tracks, seen = [], set()
         for item in entity.get("trackList", [])[:300]:
             uri, title, artists = item.get("uri", ""), item.get("title"), item.get("subtitle")
@@ -48,12 +48,15 @@ def parse_embed(html, expected_id):
         raise ProviderError("Формат страницы Spotify изменился. Пришли скриншот или список текстом.") from None
 
 
-async def fetch_playlist(session, url):
+async def fetch_playlist(session, url, store=None):
     identity = playlist_id(url)
-    try:
+    last_error = None
+    for attempt in range(2):
+      try:
         # Fixed host/path only. Do not forward user query parameters or follow redirects.
-        async with session.get("https://open.spotify.com/embed/playlist/" + identity,
-                               allow_redirects=False, timeout=aiohttp.ClientTimeout(total=20)) as response:
+        suffix = "?utm_source=generator" if attempt else ""
+        async with session.get("https://open.spotify.com/embed/playlist/" + identity + suffix,
+                               allow_redirects=False, timeout=aiohttp.ClientTimeout(total=12)) as response:
             if response.status != 200:
                 raise ProviderError(f"Spotify не открыл публичный плейлист (HTTP {response.status}). Пришли скриншот или попробуй позже.")
             body = bytearray()
@@ -61,6 +64,17 @@ async def fetch_playlist(session, url):
                 body.extend(chunk)
                 if len(body) > 2_000_000:
                     raise ProviderError("Ответ Spotify слишком большой. Используй список или скриншоты.")
-        return parse_embed(body.decode("utf-8"), identity)
-    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeDecodeError):
-        raise ProviderError("Не удалось получить страницу Spotify. Попробуй позже или пришли скриншоты.") from None
+        imported = parse_embed(body.decode("utf-8"), identity)
+        if store:
+            store.cache_playlist(identity, imported)
+        return imported
+      except (ProviderError, aiohttp.ClientError, asyncio.TimeoutError, UnicodeDecodeError) as error:
+        last_error = error
+        if attempt == 0:
+            await asyncio.sleep(0.5)
+    cached = store.cache_playlist(identity) if store else None
+    if cached:
+        return {**cached, "cached": True}
+    if isinstance(last_error, ProviderError):
+        raise last_error
+    raise ProviderError("Не удалось получить страницу Spotify с сервера. Повтори позже или загрузи скриншоты.") from None
