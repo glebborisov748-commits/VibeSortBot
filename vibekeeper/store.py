@@ -36,7 +36,7 @@ class Store:
         with self.db:
             self.db.execute("DELETE FROM oauth WHERE expires<?", (time.time(),))
             self.db.execute("DELETE FROM drafts WHERE expires<?", (time.time(),))
-            self.db.execute("DELETE FROM exports WHERE draft NOT IN (SELECT id FROM drafts)")
+            self.db.execute("DELETE FROM exports WHERE draft NOT IN (SELECT id FROM drafts) AND NOT (draft LIKE 'library:%' AND substr(draft, 9) IN (SELECT id FROM library))")
             self.db.execute("DELETE FROM playlist_cache WHERE created<?", (time.time()-86400,))
 
     def save_library(self, uid, body):
