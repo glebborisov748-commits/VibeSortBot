@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from pathlib import Path
@@ -12,8 +13,9 @@ from aiohttp import web
 from .imports import classify_import, parse_text_tracks
 from .providers import ProviderError
 from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
-from .playlist_links import fetch_playlist
-from .classifier import group_tracks
+from .music_sources import fetch_music_source, source_link
+from .automation import reanalyze_library, refresh_library, sync_loop
+from .classifier import GENRE_TAGS, LABELS, MOOD_KEYS, group_tracks
 from .models import Track
 from dataclasses import asdict
 
@@ -112,7 +114,7 @@ def install_miniapp(server, application, session):
                     if original:
                         track.uri,track.url=original['uri'],original['url']
             hint=data.get('genre_hint','')
-            allowed={'','phonk','funk','rock','pop','hip hop','electronic','metal','jazz','classical'}
+            allowed={''} | set(GENRE_TAGS.values())
             if not isinstance(hint,str) or hint not in allowed:
                 raise ProviderError('Выбери жанр из списка.')
             options=application.store.settings(uid)
@@ -120,10 +122,11 @@ def install_miniapp(server, application, session):
             return web.json_response({'error':str(error)},status=400)
         async def operation():
             draft,body=await classify_import(uid,tracks,application.store,application.curator.tagger,
-                allow_ai=not bool(public_source) and options['ai_fallback'],genre_hint=hint)
+                allow_ai=(not bool(public_source) or public_source.get('platform','spotify')!='spotify') and options['ai_fallback'],genre_hint=hint)
             if public_source:
                 body['name']=public_source['title']
                 body['source_url']=public_source['url']
+                body['source_platform']=public_source.get('platform','spotify')
                 application.store.update_library(uid,body['library_id'],body)
             return {'draft':draft,'body':body}
         return await start_job(uid,'analyze',operation)
@@ -142,15 +145,15 @@ def install_miniapp(server, application, session):
             url=data.get('url','')
             if not isinstance(url,str) or len(url)>2048:
                 raise ProviderError('Некорректная ссылка.')
-            from .playlist_links import playlist_id
-            playlist_id(url)
+            source_link(url)
         except (ValueError, AttributeError, ProviderError) as error:
             return web.json_response({'error':str(error)},status=400)
         async def operation():
-            imported=await fetch_playlist(session,url,application.store)
+            imported=await fetch_music_source(session,url,application.store)
             ref=application.store.save_draft(uid,{'source':'playlist_pending',**imported})
             return {'source_ref':ref,'text':imported['text'],'title':imported['title'],
-                    'count':len(imported['tracks']),'cached':imported.get('cached',False)}
+                    'count':len(imported['tracks']),'cached':imported.get('cached',False),
+                    'platform':imported.get('platform','spotify'),'partial':imported.get('partial',False)}
         return await start_job(uid,'playlist',operation)
 
     async def library(request):
@@ -161,6 +164,8 @@ def install_miniapp(server, application, session):
         body=application.store.library(uid,key)
         if not body:
             return web.json_response({'error':'Подборка не найдена.'},status=404)
+        if request.method in {'DELETE','PATCH'} and application.locks[uid].locked():
+            return web.json_response({'error':'Дождись окончания текущей загрузки.'},status=409)
         if request.method=='DELETE':
             application.store.delete_library(uid,key)
             for job_id in list(jobs):
@@ -174,7 +179,7 @@ def install_miniapp(server, application, session):
                 return web.json_response({'error':'Название должно содержать от 1 до 100 символов.'},status=400)
             body['name']=name.strip()
             application.store.update_library(uid,key,body)
-        return web.json_response({'id':key,'body':body})
+        return web.json_response({'id':key,'body':body,'sync':application.store.subscription(uid,key)})
 
     async def settings(request):
         uid=identity(request)
@@ -187,13 +192,15 @@ def install_miniapp(server, application, session):
 
     async def set_genre(request):
         uid=identity(request)
+        if application.locks[uid].locked():
+            return web.json_response({'error':'Дождись окончания текущей загрузки.'},status=409)
         key=request.match_info['item']
         body=application.store.library(uid,key)
         if not body:
             return web.json_response({'error':'Подборка не найдена.'},status=404)
         data=await request.json()
         genre=data.get('genre_hint')
-        allowed={'phonk','funk','rock','pop','hip hop','electronic','metal','jazz','classical'}
+        allowed=set(GENRE_TAGS.values())
         if not isinstance(genre,str) or genre not in allowed:
             return web.json_response({'error':'Выбери жанр.'},status=400)
         tracks={}
@@ -204,10 +211,49 @@ def install_miniapp(server, application, session):
                 if track.uri in unknown:
                     track.tags=[genre]
                     track.tag_source='user'
+                    track.tag_url=''
+                    application.store.track_genre(uid,track,genre)
                 tracks[track.uri]=track
         body['groups']={group:[asdict(t) for t in items] for group,items in group_tracks(list(tracks.values())).items()}
         application.store.update_library(uid,key,body)
         return web.json_response({'id':key,'body':body})
+
+    async def catalog(request):
+        return web.json_response({'labels':LABELS,'moods':sorted(MOOD_KEYS),
+                                  'genres':{tag:LABELS[key] for key,tag in GENRE_TAGS.items()},
+                                  'sources':{'spotify':True,'yandex':'experimental','youtube':bool(os.getenv('YOUTUBE_API_KEY'))}})
+
+    async def reanalyze(request):
+        uid=identity(request)
+        key=request.match_info['item']
+        if not application.store.library(uid,key):
+            return web.json_response({'error':'Подборка не найдена.'},status=404)
+        async def operation():return {'body':await reanalyze_library(uid,key,application)}
+        return await start_job(uid,'analyze',operation)
+
+    async def refresh(request):
+        uid=identity(request)
+        key=request.match_info['item']
+        body=application.store.library(uid,key)
+        if not body or not body.get('source_url'):
+            return web.json_response({'error':'Нет ссылки-источника.'},status=400)
+        async def operation():return {'body':await refresh_library(uid,key,application,session)}
+        return await start_job(uid,'analyze',operation)
+
+    async def subscription(request):
+        uid=identity(request)
+        key=request.match_info['item']
+        body=application.store.library(uid,key)
+        if not body or not body.get('source_url'):
+            return web.json_response({'error':'Обновление доступно только для импортированных ссылок.'},status=400)
+        data=await request.json()
+        enabled=data.get('enabled')
+        if type(enabled) is not bool:
+            return web.json_response({'error':'Неверная настройка.'},status=400)
+        count=application.store.db.execute('SELECT count(*) FROM subscriptions WHERE uid=?',(uid,)).fetchone()[0]
+        if enabled and count>=5 and not application.store.subscription(uid,key)['enabled']:
+            return web.json_response({'error':'Можно включить до пяти автоматических источников.'},status=400)
+        return web.json_response(application.store.subscription(uid,key,enabled))
 
     async def delete_data(request):
         uid=identity(request)
@@ -227,16 +273,19 @@ def install_miniapp(server, application, session):
                 for uid in list(last_ocr):
                     if time.monotonic()-last_ocr[uid]>3600: del last_ocr[uid]
         cleaner=asyncio.create_task(clean())
+        syncer=asyncio.create_task(sync_loop(application,session))
         yield
         cleaner.cancel()
+        syncer.cancel()
         for task in list(tasks): task.cancel()
-        await asyncio.gather(cleaner,*tasks,return_exceptions=True)
+        await asyncio.gather(cleaner,syncer,*tasks,return_exceptions=True)
 
     server.cleanup_ctx.append(lifecycle)
     server.router.add_get('/',index)
     server.router.add_get('/app',index)
     server.router.add_post('/api/ocr',ocr)
     server.router.add_post('/api/playlist',playlist)
+    server.router.add_get('/api/catalog',catalog)
     server.router.add_post('/api/analyze',analyze)
     server.router.add_get('/api/jobs/{job}',status)
     server.router.add_get('/api/library',library)
@@ -246,4 +295,7 @@ def install_miniapp(server, application, session):
     server.router.add_get('/api/settings',settings)
     server.router.add_put('/api/settings',settings)
     server.router.add_post('/api/library/{item}/genre',set_genre)
+    server.router.add_post('/api/library/{item}/reanalyze',reanalyze)
+    server.router.add_post('/api/library/{item}/refresh',refresh)
+    server.router.add_put('/api/library/{item}/sync',subscription)
     server.router.add_delete('/api/data',delete_data)
