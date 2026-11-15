@@ -21,7 +21,7 @@ from .service import Curator
 from .store import Store
 from .miniapp import install_miniapp
 from .vision import MAX_IMAGE_BYTES, ai_available, recognize_tracks
-from .playlist_links import fetch_playlist
+from .music_sources import fetch_music_source as fetch_playlist
 
 HELP = (
     "🎧 <b>VibeSort</b> раскладывает твою музыку по жанрам и настроению.\n\n"
@@ -102,14 +102,15 @@ class Application:
             return
 
         async def operation():
-            if message.text and re.search(r"https://open\.spotify\.com/\S+", message.text):
-                url = re.search(r"https://open\.spotify\.com/\S+", message.text).group(0)
+            link_pattern = r"https://(?:open\.spotify\.com|music\.yandex\.(?:ru|com|by|kz)|music\.youtube\.com|www\.youtube\.com|youtube\.com)/\S+"
+            if message.text and re.search(link_pattern, message.text):
+                url = re.search(link_pattern, message.text).group(0)
                 await message.answer("Загружаю публично доступные песни плейлиста…")
                 imported = await fetch_playlist(self.session, url, self.store)
                 draft = self.store.save_draft(uid, {"source": "playlist_pending", **imported})
                 preview = "\n".join(imported["text"].splitlines()[:5])
                 await message.answer(escape(imported["title"]) + f"\nПолучено треков: {len(imported['tracks'])}.\n\n" + escape(preview) +
-                                     "\n\nЭто песни, которые Spotify показал без входа; полный состав не гарантирован. Разбор по тегам Last.fm.",
+                                     "\n\nПолучены открытые песни; полный состав может быть ограничен платформой.",
                                      reply_markup=keyboard([[button("Разобрать этот список", f"playlist:{draft}")]]))
                 return
             if getattr(message, "photo", None):
@@ -162,7 +163,7 @@ class Application:
                     if not self.config.lastfm_key and not ai_available():
                         raise ProviderError("Разбор пока настраивается владельцем бота. Сейчас можно посмотреть пример: /demo.")
                     await message.answer(f"Ищу жанры и настроение для {len(tracks)} треков…")
-                    draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger)
+                    draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger, allow_ai=self.store.settings(uid)['ai_fallback'])
                     await self.show_groups(draft, body, message.answer)
                 else:
                     await message.answer("Список команд: /help")
@@ -218,7 +219,7 @@ class Application:
         buffer = await self.bot.download_file(source.file_path)
         data = buffer.read(MAX_IMPORT_BYTES + 1)
         await message.answer("Читаю список и ищу жанры и настроение. Это может занять несколько минут.")
-        draft, body = await import_draft(uid, data, self.store, self.curator.tagger)
+        draft, body = await import_draft(uid, data, self.store, self.curator.tagger, allow_ai=self.store.settings(uid)['ai_fallback'])
         await self.show_groups(draft, body, message.answer)
 
     async def scan(self, uid, reply):
@@ -276,7 +277,10 @@ class Application:
                     raise ProviderError("Загруженный плейлист устарел. Отправь ссылку заново.")
                 tracks = [Track(**item) for item in pending["tracks"]]
                 await reply("Ищу теги для загруженных треков…")
-                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger, allow_ai=False)
+                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger,
+                    allow_ai=pending.get('platform','spotify')!='spotify' and self.store.settings(uid)['ai_fallback'])
+                body['source_url'],body['source_platform']=pending['url'],pending.get('platform','spotify')
+                self.store.update_library(uid,body['library_id'],body)
                 await self.show_groups(draft, body, reply)
                 return
             if len(parts) == 2 and parts[0] == "photo":
@@ -285,7 +289,7 @@ class Application:
                     raise ProviderError("Распознанный список устарел. Отправь фото заново.")
                 tracks = parse_text_tracks(pending["text"])
                 await reply("Ищу жанры и настроение…")
-                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger)
+                draft, body = await classify_import(uid, tracks, self.store, self.curator.tagger, allow_ai=self.store.settings(uid)['ai_fallback'])
                 await self.show_groups(draft, body, reply)
                 return
             if parts == ["import"]:
@@ -397,7 +401,7 @@ async def secure_headers(request, handler):
         logging.getLogger(__name__).error("API failed: %s", type(error).__name__)
         response = web.json_response({"error": "Не удалось завершить запрос. Попробуй позже."}, status=500)
     response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src https://open.spotify.com; frame-ancestors https://web.telegram.org https://*.telegram.org"})
+                             "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src https://open.spotify.com https://www.youtube-nocookie.com; frame-ancestors https://web.telegram.org https://*.telegram.org"})
     return response
 
 
