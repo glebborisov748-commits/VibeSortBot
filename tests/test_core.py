@@ -31,7 +31,7 @@ def config(tmp_path):
                   frozenset({1}), "lastfm", tmp_path)
 
 
-def track(uri="spotify:track:1", tags=None):
+def track(uri="spotify:track:1111111111111111111111", tags=None):
     return Track(uri, "Track", ["Artist"], "https://open.spotify.com/track/1", tags or [])
 
 
@@ -90,7 +90,7 @@ async def test_export_idempotent_and_owned(store):
     assert await curator.export(1, draft, "rock") == "new"
     assert await curator.export(1, draft, "rock") == "new"
     provider.create_playlist.assert_awaited_once()
-    provider.add_tracks.assert_awaited_once_with(1, "new", ["spotify:track:1"])
+    provider.add_tracks.assert_awaited_once_with(1, "new", ["spotify:track:1111111111111111111111"])
 
 
 @pytest.mark.asyncio
