@@ -5,6 +5,7 @@ import os
 import aiohttp
 
 from .providers import ProviderError
+from .classifier import GENRE_TAGS
 
 MAX_IMAGE_BYTES = 6_000_000
 
@@ -15,8 +16,7 @@ def ai_available():
 
 async def infer_tags(session, tracks):
     """Approximate metadata only, never audio analysis. Used for user-uploaded lists."""
-    allowed = {"phonk", "funk", "rock", "pop", "hip hop", "electronic", "metal", "jazz", "classical",
-               "chill", "energetic", "melancholic", "dark", "romantic"}
+    allowed = set(GENRE_TAGS.values()) | {"chill", "energetic", "melancholic", "dark", "romantic"}
     key = os.getenv("PROVOD_API_KEY") or os.getenv("AI_API_KEY")
     if not key:
         raise ProviderError("Не подключён резервный AI-разбор.")
