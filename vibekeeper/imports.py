@@ -9,13 +9,13 @@ from .providers import ProviderError
 from .vision import ai_available, infer_tags
 
 MAX_IMPORT_BYTES = 1_000_000
-MAX_IMPORT_ROWS = 300
+MAX_IMPORT_ROWS = 1000
 
 
 def parse_text_tracks(text: str) -> list[Track]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines or len(lines) > MAX_IMPORT_ROWS:
-        raise ProviderError("Пришли от 1 до 300 треков, каждый с новой строки: Исполнитель — Название.")
+        raise ProviderError("Пришли от 1 до 1000 треков, каждый с новой строки: Исполнитель — Название.")
     tracks, seen = [], set()
     for number, line in enumerate(lines, 1):
         parts = re.split(r"\s+[—–-]\s+", line, maxsplit=1)
@@ -37,7 +37,7 @@ def playlist_text(items: list[dict]) -> bytes:
 
 def parse_tracks(data: bytes) -> list[Track]:
     if len(data) > MAX_IMPORT_BYTES:
-        raise ProviderError("Файл слишком большой. Максимум — 1 МБ и 300 треков.")
+        raise ProviderError("Файл слишком большой. Максимум — 1 МБ и 1000 треков.")
     try:
         content = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -125,7 +125,7 @@ async def classify_import(uid, tracks, store, tagger, allow_ai=True, genre_hint=
     body["name"] = (" · ".join(titles[:2]) if titles else "Моя музыка") + f" · {len(tracks)} треков"
     if previous:
         body["name"] = previous.get("name", body["name"])
-        for key in ("source_url", "source_platform"):
+        for key in ("source_url", "source_platform", "source_kind"):
             if key in previous: body[key]=previous[key]
         if not store.update_library(uid, target_library, body):
             raise ProviderError("Подборка уже удалена. Начни новую загрузку.")
