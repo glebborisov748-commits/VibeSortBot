@@ -22,6 +22,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, uid INTEGER, body BLOB, expires REAL);
             CREATE TABLE IF NOT EXISTS exports(draft TEXT, category TEXT, uid INTEGER, status TEXT,
                 playlist TEXT, PRIMARY KEY(draft, category));
+            CREATE TABLE IF NOT EXISTS library(id TEXT PRIMARY KEY, uid INTEGER, body BLOB, created REAL);
+            CREATE INDEX IF NOT EXISTS library_owner ON library(uid, created);
+            CREATE TABLE IF NOT EXISTS settings(uid INTEGER PRIMARY KEY, body BLOB);
+            CREATE TABLE IF NOT EXISTS playlist_cache(id TEXT PRIMARY KEY, body BLOB, created REAL);
         """)
         self.purge_expired()
 
@@ -30,6 +34,47 @@ class Store:
             self.db.execute("DELETE FROM oauth WHERE expires<?", (time.time(),))
             self.db.execute("DELETE FROM drafts WHERE expires<?", (time.time(),))
             self.db.execute("DELETE FROM exports WHERE draft NOT IN (SELECT id FROM drafts)")
+            self.db.execute("DELETE FROM playlist_cache WHERE created<?", (time.time()-86400,))
+
+    def save_library(self, uid, body):
+        identity = secrets.token_hex(12)
+        with self.db:
+            self.db.execute("INSERT INTO library VALUES (?, ?, ?, ?)", (identity, uid, self._encrypt(body), time.time()))
+        return identity
+
+    def library(self, uid, identity=None):
+        if identity:
+            row = self.db.execute("SELECT body FROM library WHERE id=? AND uid=?", (identity, uid)).fetchone()
+            return self._decrypt(row[0]) if row else None
+        rows = self.db.execute("SELECT id, body, created FROM library WHERE uid=? ORDER BY created DESC LIMIT 50", (uid,)).fetchall()
+        result = []
+        for row in rows:
+            body = self._decrypt(row["body"])
+            result.append({"id": row["id"], "created": row["created"], "name": body.get("name", "Мои подборки"),
+                           "scanned": body.get("scanned", 0), "categories": {k:len(v) for k,v in body.get("groups", {}).items()}})
+        return result
+
+    def delete_library(self, uid, identity):
+        with self.db:
+            self.db.execute("DELETE FROM library WHERE uid=? AND id=?", (uid, identity))
+
+    def update_library(self, uid, identity, body):
+        with self.db:
+            return self.db.execute("UPDATE library SET body=? WHERE uid=? AND id=?", (self._encrypt(body), uid, identity)).rowcount == 1
+
+    def settings(self, uid, body=None):
+        if body is not None:
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (uid, self._encrypt(body)))
+        row = self.db.execute("SELECT body FROM settings WHERE uid=?", (uid,)).fetchone()
+        return self._decrypt(row[0]) if row else {"ai_fallback": True}
+
+    def cache_playlist(self, identity, body=None):
+        if body is not None:
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO playlist_cache VALUES (?, ?, ?)", (identity, self._encrypt(body), time.time()))
+        row = self.db.execute("SELECT body FROM playlist_cache WHERE id=? AND created>?", (identity, time.time()-86400)).fetchone()
+        return self._decrypt(row[0]) if row else None
 
     def _encrypt(self, value):
         return self.cipher.encrypt(json.dumps(value, ensure_ascii=False).encode())
@@ -92,7 +137,7 @@ class Store:
 
     def disconnect(self, uid):
         with self.db:
-            for table in ("accounts", "oauth", "drafts", "exports"):
+            for table in ("accounts", "oauth", "drafts", "exports", "library", "settings"):
                 self.db.execute(f"DELETE FROM {table} WHERE uid=?", (uid,))
 
     def close(self):
