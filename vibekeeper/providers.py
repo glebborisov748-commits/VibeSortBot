@@ -138,6 +138,9 @@ class Spotify:
             "description": "Из моих любимых треков. Подборка по тегам Last.fm; настроение приблизительное.",
         })
 
+    async def validate_access(self, uid):
+        return await self.request(uid, "GET", "/me")
+
     async def add_tracks(self, uid, playlist_id, uris):
         for start in range(0, len(uris), 100):
             await self.request(uid, "POST", f"/playlists/{playlist_id}/items", json={"uris": uris[start:start+100]})
