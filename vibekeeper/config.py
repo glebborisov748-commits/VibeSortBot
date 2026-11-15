@@ -15,7 +15,7 @@ class Config:
     lastfm_key: str
     data_dir: Path
     port: int = 3000
-    scan_limit: int = 300
+    scan_limit: int = 1000
 
     @classmethod
     def from_env(cls):
@@ -29,7 +29,7 @@ class Config:
         if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username:
             raise ValueError("PUBLIC_BASE_URL должен быть HTTPS-адресом без пути")
         ids = frozenset(int(x.strip()) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",") if x.strip())
-        limit = int(os.getenv("SCAN_LIMIT", "300"))
+        limit = int(os.getenv("SCAN_LIMIT", "1000"))
         if not 1 <= limit <= 10000:
             raise ValueError("SCAN_LIMIT должен быть от 1 до 10000")
         return cls(os.environ["BOT_TOKEN"], os.getenv("SPOTIFY_CLIENT_ID", ""),
