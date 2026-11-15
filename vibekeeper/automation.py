@@ -5,6 +5,7 @@ from .imports import classify_import
 from .models import Track
 from .music_sources import fetch_music_source
 from .providers import ProviderError
+from dataclasses import asdict
 
 
 def library_tracks(body):
@@ -18,7 +19,11 @@ async def refresh_library(uid,key,application,session):
     body=application.store.library(uid,key)
     if not body or not body.get('source_url'):
         raise ProviderError('У этой подборки нет ссылки-источника. Загрузить её можно заново через фото или список.')
-    imported=await fetch_music_source(session,body['source_url'],application.store)
+    if body.get('source_kind')=='spotify_likes':
+        latest,total=await application.spotify.liked_tracks(uid,10000)
+        imported={'tracks':[asdict(track) for track in latest],'platform':'spotify','url':'spotify:liked','total':total}
+    else:
+        imported=await fetch_music_source(session,body['source_url'],application.store)
     tracks=[Track(**item) for item in imported['tracks']]
     old={track.uri:track for track in library_tracks(body)}
     for track in tracks:
