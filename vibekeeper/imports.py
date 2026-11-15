@@ -3,7 +3,7 @@ import io
 import re
 from dataclasses import asdict
 
-from .classifier import LABELS, group_tracks
+from .classifier import GENRE_TAGS, LABELS, group_tracks, matching_categories
 from .models import Track
 from .providers import ProviderError
 from .vision import ai_available, infer_tags
@@ -80,15 +80,24 @@ def playlist_csv(items: list[dict]) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-async def import_draft(uid, data, store, tagger):
+async def import_draft(uid, data, store, tagger, allow_ai=True):
     tracks = parse_tracks(data)
-    return await classify_import(uid, tracks, store, tagger)
+    return await classify_import(uid, tracks, store, tagger, allow_ai=allow_ai)
 
 
-async def classify_import(uid, tracks, store, tagger, allow_ai=True, genre_hint=""):
+async def classify_import(uid, tracks, store, tagger, allow_ai=True, genre_hint="", target_library=None):
+    previous = store.library(uid, target_library) if target_library else None
+    if target_library and not previous:
+        raise ProviderError("Подборка не найдена.")
     warning = ""
-    allowed_hints = {"phonk", "funk", "rock", "pop", "hip hop", "electronic", "metal", "jazz", "classical"}
+    allowed_hints = set(GENRE_TAGS.values())
     manual_genre = genre_hint in allowed_hints
+    for track in tracks:
+        saved_genre=store.track_genre(uid,track)
+        if saved_genre in allowed_hints and not manual_genre:
+            track.tags=[saved_genre]
+            track.tag_source='user'
+            track.tag_url=''
     if not manual_genre:
         try:
             await tagger.enrich(tracks)
@@ -96,18 +105,31 @@ async def classify_import(uid, tracks, store, tagger, allow_ai=True, genre_hint=
             if not ai_available() and allow_ai:
                 raise
             warning = str(error)
-    missing = [track for track in tracks if not track.tags]
+    # Tags such as '2024', 'favorite' and artist names are not genres. They must
+    # not accidentally suppress the AI fallback for otherwise unclassified tracks.
+    missing = [track for track in tracks if not matching_categories(track.tags)]
     if missing and ai_available() and allow_ai and not manual_genre:
         await infer_tags(tagger.session, missing)
     if manual_genre:
         for track in tracks:
-            track.tags.append(genre_hint)
+            if genre_hint not in track.tags:
+                track.tags.append(genre_hint)
             track.tag_source = "user" if not track.tag_source else track.tag_source
+            store.track_genre(uid,track,genre_hint)
     groups = group_tracks(tracks)
     body = {"total": len(tracks), "scanned": len(tracks), "demo": False, "source": "import", "tag_warning": warning,
+            "genre_hint": genre_hint,
             "ai_estimated": any(track.tag_source == "ai" for track in tracks),
             "groups": {key: [asdict(track) for track in group] for key, group in groups.items()}}
     titles = [LABELS[key] for key in groups if key != "unknown"]
     body["name"] = (" · ".join(titles[:2]) if titles else "Моя музыка") + f" · {len(tracks)} треков"
-    body["library_id"] = store.save_library(uid, body)
+    if previous:
+        body["name"] = previous.get("name", body["name"])
+        for key in ("source_url", "source_platform"):
+            if key in previous: body[key]=previous[key]
+        if not store.update_library(uid, target_library, body):
+            raise ProviderError("Подборка уже удалена. Начни новую загрузку.")
+        body["library_id"] = target_library
+    else:
+        body["library_id"] = store.save_library(uid, body)
     return store.save_draft(uid, body), body
